@@ -15,7 +15,7 @@ import Data.List.NonEmpty (toList)
 
 import AstInfo
 import PrettyString
-import ProofBase ( ExprInfo(..), SideExprInfo(..) )
+import ProofBase ( Rewrite(..), Tactic(..) )
 
 sorteDeclConvrs :: [DeclConversions] -> Either Cyrcles [DeclConversions]
 sorteDeclConvrs declConvrs = topoSort $ toNodes declConvrs
@@ -31,12 +31,12 @@ toNodes :: [DeclConversions] -> [EdgeDC]
 toNodes decls = map (\dc@(decl_id, cnvrs) -> (dc, decl_id, cnInfoStr cnvrs)) decls
   where
     cnInfoStr :: [Conversion] -> [Id]
-    cnInfoStr = mapMaybe (exprInfoToStr . cnToExprInfo)
-    exprInfoToStr cnvr = case cnvr of
+    cnInfoStr = mapMaybe (rewriteToStr . cnToRewrite)
+    rewriteToStr cnvr = case cnvr of
       Just (Def  s) -> findIdByStr s
       Just (Prop s) -> findIdByStr s
       _             -> Nothing
-    cnToExprInfo  cnvr = case cn_info cnvr of
+    cnToRewrite  cnvr = case cn_info cnvr of
       L ei -> Just ei
       R ei -> Just ei
       Postulate -> Nothing
@@ -64,4 +64,3 @@ topoSort dc_edges =
         go :: SCC DeclConversions -> Cyrcles -> Cyrcles
         go (NECyclicSCC vs) acc = map fst (toList vs) : acc
         go _ acc                = acc
-

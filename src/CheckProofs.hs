@@ -35,14 +35,12 @@ import GHC.Core.FamInstEnv (extendFamInstEnvList, emptyFamInstEnv)
 import GHC.Core.Opt.Simplify (SimplifyExprOpts(..))
 import GHC.Core.Opt.Simplify.Env ( getInScope, mkSimplEnv, setInScopeSet, seRuleOpts, SimplEnv (seMode) )
 import GHC.Core.Opt.Simplify.Utils ( getUnfoldingInRuleMatch, activeRule )
-import GHC.Core.SimpleOpt ( defaultSimpleOpts, simpleOptExpr, SimpleOpts(..) )
+import GHC.Core.SimpleOpt ( defaultSimpleOpts, simpleOptExpr )
 
 import AstInfo
 import PrettyString
-import ProofBase ( ExprInfo(..), SideExprInfo(..) )
+import ProofBase ( Rewrite(..), Tactic(..) )
 import SortDecls ( sorteDeclConvrs )
-import GHC.Core.Unfold (defaultUnfoldingOpts)
-import GHC.Core.Coercion.Opt (OptCoercionOpts(OptCoercionOpts, optCoercionEnabled))
 
 
 logPath :: FilePath
@@ -136,7 +134,7 @@ collectConvrs (f_id, f_body) = case map getConvrs pairs_skip_lhe_qed of
       (Var cmnt) | getStrById cmnt == "QED" -> False
       _ -> True
     ) pairs
-  getConvrs ((lhe, c1), (rhe, _)) = Conversion lhe rhe (toSideExprInfo c1)
+  getConvrs ((lhe, c1), (rhe, _)) = Conversion lhe rhe (toTactic c1)
 ---- END COLLECTING AST STATE
 
 
@@ -144,36 +142,36 @@ collectConvrs (f_id, f_body) = case map getConvrs pairs_skip_lhe_qed of
 -- | Helper function to create pretty fails report
 createFail :: CheckerST -> String -> (Id, String)
 createFail CheckerST{..} reason = (,) d_id $
-    "Fail in decl: " ++ str_decl_id ++ " in conversion number: " ++ show st_cnvrs_count ++ 
+    "Fail in decl: " ++ str_decl_id ++ " in conversion number: " ++ show st_cnvrs_count ++
     "\nReason:\n" ++ reason ++ "\n"
   where
-    (d_id, str_decl_id) = case st_declconvr_id of 
+    (d_id, str_decl_id) = case st_declconvr_id of
       Just d  -> (d, getStrById d)
       Nothing -> error "Have failure but no st_declconvr_id"
 
 getStrById :: Id -> String
 getStrById v = occNameString (getOccName v)
 
-toSideExprInfo :: CoreExpr -> SideExprInfo
-toSideExprInfo (App (Var expr_side) expr_info) = toSideInfo (toExprInfo expr_info)
+toTactic :: CoreExpr -> Tactic
+toTactic (App (Var expr_side) expr_info) = toSideInfo (toRewrite expr_info)
   where
   toSideInfo
     | getStrById expr_side == "L" = L
     | getStrById expr_side == "R" = R
     | otherwise = err "`L` or `R`" expr_side
-  toExprInfo (Var v)
+  toRewrite (Var v)
     | getStrById v == "Beta" = Beta
     | getStrById v == "Eta"  = Eta
-  toExprInfo (App (Var v_id) (App _ (Lit (LitString pack_str))))
+  toRewrite (App (Var v_id) (App _ (Lit (LitString pack_str))))
     | getStrById v_id == "Def"  = Def  $ BS8.unpack pack_str
     | getStrById v_id == "Prop" = Prop $ BS8.unpack pack_str
     | getStrById v_id == "Inst" = Inst $ BS8.unpack pack_str
-  toExprInfo (App (App (Var v_id) (App _ (Lit (LitString pack_str)))) (App _ (Lit (LitNumber _ n))))
+  toRewrite (App (App (Var v_id) (App _ (Lit (LitString pack_str)))) (App _ (Lit (LitNumber _ n))))
     | getStrById v_id == "DefRec" && n > 0 = DefRec (BS8.unpack pack_str) n
-  toExprInfo _ = err "`Beta`, `Eta`, `Def  comment`, `Prop comment`, `Inst comment` or DefRec comment n > 0" expr_info
+  toRewrite _ = err "`Beta`, `Eta`, `Def  comment`, `Prop comment`, `Inst comment` or DefRec comment n > 0" expr_info
   err str_expect e = error $ "Unexpected expression structure for comment, expected " ++ str_expect ++ ".\nGot: " ++ prettyString e
-toSideExprInfo (Var expr_side) | getStrById expr_side == "Postulate" = Postulate
-toSideExprInfo e = error $ "Unexpected expression structure for comment, expected a function application with a string literal argument.\nGot: " ++ prettyString e
+toTactic (Var expr_side) | getStrById expr_side == "Postulate" = Postulate
+toTactic e = error $ "Unexpected expression structure for comment, expected a function application with a string literal argument.\nGot: " ++ prettyString e
 
 {-|
 -- assume that any variable in convertion is OR
@@ -204,7 +202,7 @@ mapPassStM f (a:as) s = do
 
 -- | Helper creating PostlDef
 mkRulePstl :: HscEnv -> Id -> [CoreBndr] -> CoreExpr -> CoreExpr -> Maybe PostlDef
-mkRulePstl hscEnv pstl_id pstl_binds pstl_lhs pstl_rhs = 
+mkRulePstl hscEnv pstl_id pstl_binds pstl_lhs pstl_rhs =
   case lhs_func of
         Var fid -> Just $ mkRuleHelper (getName fid) fid
         _       -> Nothing
@@ -232,12 +230,12 @@ logMsg log_msg = liftIO $ appendFile logPath (log_msg ++ "\n")
 
 
 incCnvrsCounter :: CheckerM ()
-incCnvrsCounter = 
+incCnvrsCounter =
   do
     modify (\st -> st { st_cnvrs_count = st_cnvrs_count st + 1 })
     cnvrs_count <- gets st_cnvrs_count
     decl_id     <- gets st_declconvr_id
-    logMsg $ "\n----------------\n" ++ 
+    logMsg $ "\n----------------\n" ++
       "Start analyzing: decl=`" ++ prettyString decl_id ++ "` conversion=" ++ show cnvrs_count ++ "\n"
 
 newDeclCnvrs :: Id -> CheckerM ()
@@ -252,11 +250,11 @@ madePostulate fn_id =
 
     (convrs_fst, convrs_lst) <- case lookup f_id declConvrs of
       Just convrs@(cnvr:_) -> return (cnvr, last convrs)
-      _                    -> throwError $ 
+      _                    -> throwError $
         "Unexpected state. Succesfully analized " ++ getStrById f_id ++ " but it doesn't have conversions."
     hscEnv     <- gets st_hscenv
     case mkRulePstl hscEnv f_id pstl_binds (cn_lhs convrs_fst) (cn_rhs convrs_lst) of
-      Nothing -> logMsg $ "Can't make postulate from `" ++ prettyString f_id ++ 
+      Nothing -> logMsg $ "Can't make postulate from `" ++ prettyString f_id ++
         "`.\n  Pstl_lhs must be of form (f e1 .. en) where f is not forall'd.\n"
       Just new_postl -> do
         logMsg $ "Made new postulate from: " ++ prettyString f_id ++ "\n"
@@ -285,7 +283,7 @@ analyzeModuleSt checkerST =
     analyzeDeclCnvrs (decl_id, cnvrs) =
       do
         newDeclCnvrs decl_id
-        logMsg $ "\n-----------------------------\n" ++ 
+        logMsg $ "\n-----------------------------\n" ++
           "Start analyze declConversion: " ++ prettyString decl_id ++ "\n"
         mapM_ analyzeConvrs cnvrs
         madePostulate decl_id
@@ -296,15 +294,15 @@ analyzeModuleSt checkerST =
 -- | Final comparison
 cmpCnvrs :: CoreExpr -> CoreExpr -> CheckerM ()
 cmpCnvrs e_cntr e | alphaEq e_cntr e = logMsg "Compare result: True\n"
-cmpCnvrs e_cntr e = 
+cmpCnvrs e_cntr e =
   do
     logMsg $
       "EXPR: " ++ prettyString e ++ "\n" ++
       "==?==\n" ++
       "CNTR: " ++ prettyString e_cntr ++ "\n" ++
       "Compare result: False\n"
-    throwError $ "Error. Not equal." ++ 
-      "\n\nExpected: " ++ prettyString e_cntr ++ 
+    throwError $ "Error. Not equal." ++
+      "\n\nExpected: " ++ prettyString e_cntr ++
       "\n\n    Got: " ++ prettyString e ++ "\n"
 
 -- | Main function entry for analyzing single conversion
@@ -334,11 +332,11 @@ analyzeConvrs Conversion{..} =
 ---- just believe that this is enought
 -- | Function search of first diff between expression
 getFirstDiff :: CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr -> CoreExpr)
-getFirstDiff contrl_expr expr = 
+getFirstDiff contrl_expr expr =
   do
-    (d_expr, bldr, _) <- go ([], []) contrl_expr expr 
-    logMsg $ "getFirstDiff result:" ++ 
-      "\ncntr_expr:\n" ++ prettyString contrl_expr ++ 
+    (d_expr, bldr, _) <- go ([], []) contrl_expr expr
+    logMsg $ "getFirstDiff result:" ++
+      "\ncntr_expr:\n" ++ prettyString contrl_expr ++
       "\nexpr:\n" ++ prettyString d_expr ++ "\n"
     return (d_expr, bldr)
 
@@ -359,8 +357,8 @@ getFirstDiff contrl_expr expr =
 
     updBuilder updater (diff_expr, builder, _) = (diff_expr, updater builder, False)
     checkEq cm_envs ce e is_collect
-      | alphaEqWithEnv cm_envs ce e = throwError $ "No difference." ++ 
-        "\n  cntr_expr: " ++ prettyString ce ++ 
+      | alphaEqWithEnv cm_envs ce e = throwError $ "No difference." ++
+        "\n  cntr_expr: " ++ prettyString ce ++
         "\n       expr: " ++ prettyString e ++ "\n"
       | otherwise    = do
         logMsg $ "Get diff:\n  cntr_expr: " ++ prettyString ce ++ "\n       expr: " ++ prettyString e ++ "\n"
@@ -422,9 +420,9 @@ analyzeDefConv comment n control_expr expr =
     checkComment :: CoreExpr -> CheckerM Id
     checkComment (Var func_id)
       | getStrById func_id == comment = return func_id
-      | otherwise                     = throwError $ 
-        "Applied function_id does not match comment:" ++ 
-        "\n Expected: " ++ comment ++ 
+      | otherwise                     = throwError $
+        "Applied function_id does not match comment:" ++
+        "\n Expected: " ++ comment ++
         "\n Got     : " ++ prettyString func_id
     checkComment e = throwError $ "Applied expression not a function call!\nGot: " ++ prettyString e
 
@@ -483,10 +481,10 @@ analyzeInstConv comment control_expr expr =
         let func_body    = unfoldingTemplate $ idUnfolding func_id
 
         {- TODO check why doesn't work
-          logMsg $ "SUBS_INST" ++ 
-            "\nsubst_func:\n" ++ prettyString subst_func ++ 
-            "\n      func:\n" ++ prettyString func ++ 
-            "\n   func_id:\n" ++ prettyString func_id ++ 
+          logMsg $ "SUBS_INST" ++
+            "\nsubst_func:\n" ++ prettyString subst_func ++
+            "\n      func:\n" ++ prettyString func ++
+            "\n   func_id:\n" ++ prettyString func_id ++
             "\n func_body:\n" ++ prettyString func_body
         -}
         let subst_selector = mkCoreApps func_body (take 2 args)
@@ -518,9 +516,9 @@ analyzeInstConv comment control_expr expr =
     checkComment :: CoreExpr -> CheckerM Id
     checkComment (Var func_id)
       | getStrById func_id == comment = return func_id
-      | otherwise  = throwError $ 
-        "Applied function_id does not match comment:" ++ 
-        "\n Expected: " ++ comment ++ 
+      | otherwise  = throwError $
+        "Applied function_id does not match comment:" ++
+        "\n Expected: " ++ comment ++
         "\n Got     : " ++ prettyString func_id
     checkComment e = throwError $ "Applied expression not a function call!\nGot: " ++ prettyString e
 
@@ -557,8 +555,8 @@ simplifyOptFunc :: CoreExpr -> CheckerM CoreExpr
 simplifyOptFunc expr = go 0 expr
   where
     go :: Int -> CoreExpr -> CheckerM CoreExpr
-    go n _ | n >= 3 = throwError $ 
-      "Unexpected expression. Expression needs to much beta-reductions. " ++ 
+    go n _ | n >= 3 = throwError $
+      "Unexpected expression. Expression needs to much beta-reductions. " ++
       "Default threshold = 3. Expr:\n" ++ prettyString expr ++ "\n"
     go n e = do
       logMsg $ "Try simplifyOptFunc n=" ++ show n ++ "\n"
@@ -603,8 +601,8 @@ substRule pstls expr =
     case lookupRule ru_opts in_scope_env act_fun f_target args_targetgs rules of
       Nothing -> do
         logMsg     $ "Rule `" ++ rules_id_str ++ "`not fired." ++ "\n"
-        throwError $ "Rule `" ++ rules_id_str ++ "`not fired." ++ 
-          "\nRule:\n" ++ prettyString pstls ++ 
+        throwError $ "Rule `" ++ rules_id_str ++ "`not fired." ++
+          "\nRule:\n" ++ prettyString pstls ++
           "\nExpr:\n" ++ prettyString expr ++ "\n"
       Just (applied_rule, new_expr) -> do
           logMsg $ "Rule fired:" ++ rules_id_str ++ "\n"
@@ -619,20 +617,19 @@ substRule pstls expr =
 -- {- TODO:
 --     * collectModule no dif just yet
 --     * analyze each conversion separatly
---         * Chcek comment. 
---         * if Func 
+--         * Chcek comment.
+--         * if Func
 --             * take correct hand-side
---             * find first applied function: 
---                 * it could be inside lam 
+--             * find first applied function:
+--                 * it could be inside lam
 --                 * compare that before that alphaEq
 --             * Check that function coresponds with comment
 --             * Find defenition for func
---             * subst and restore function 
---             * simplify ? (restored function) (whole expr) 
---             * letinlined 
+--             * subst and restore function
+--             * simplify ? (restored function) (whole expr)
+--             * letinlined
 --             * compare alphaEq
 --         * if Beta
 --             * compare alphaEq
 --     * prettyStringBinds (cm_binds coreMod)
 -- -}
-

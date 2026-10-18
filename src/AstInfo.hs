@@ -14,7 +14,7 @@ import GHC.Types.Id ( Id )
 import Control.Monad.Except (ExceptT)
 import Control.Monad.State.Lazy (StateT)
 
-import ProofBase ( SideExprInfo )
+import ProofBase ( Tactic )
 
 -- | Represents a conversion between two Core expressions.
 --
@@ -30,8 +30,8 @@ data Conversion = Conversion {
   -- | Right-hand side expression.
   cn_rhs  :: CoreExpr,
 
-  -- | Information associated with the conversion.
-  cn_info :: SideExprInfo
+  -- | Conversion tactic.
+  cn_info :: Tactic
 }
 
 -- | All conversions associated with a declaration identifier.
@@ -65,7 +65,7 @@ data PostlDef = PostlDef {
 -- information.
 data CheckerST = CheckerST {
   -- | Conversions grouped by declaration.
-  st_declconvrs   :: [DeclConversions], 
+  st_declconvrs   :: [DeclConversions],
 
   -- | All discovered function definitions.
   st_funcdefs     :: [FuncDef],

@@ -22,7 +22,7 @@ import GHC.Utils.Outputable
 import Data.List (intercalate)
 
 import AstInfo
-import ProofBase ( ExprInfo(..), SideExprInfo(..) )
+import ProofBase ( Rewrite(..), Tactic(..) )
 
 
 
@@ -62,9 +62,9 @@ instance Outputable PostlDef where
         $$ text "rule:" <+> ppr (pstl_rule p)
       )
 
-instance Outputable ExprInfo where
-  ppr exprInfo =
-    case exprInfo of
+instance Outputable Rewrite where
+  ppr rewrite =
+    case rewrite of
       Def name ->
         text "Def " <+> doubleQuotes (text name)
       Prop name ->
@@ -81,7 +81,7 @@ instance Outputable ExprInfo where
           <+> parens (text "depth =" <+> integer depth)
 
 
-instance Outputable SideExprInfo where
+instance Outputable Tactic where
   ppr sideInfo =
     case sideInfo of
       L expr ->

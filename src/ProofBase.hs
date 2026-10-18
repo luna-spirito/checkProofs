@@ -4,20 +4,20 @@ Description : Annotation operators and base function defenition from Haskell rep
 
 This module contains operators for  annotating equation reasonings and basic functions coppied from Haskell report.
 -}
-module ProofBase where
+module ProofBase (Tactic(..), Rewrite(..), (--.), (===), (.), ($), id, flip, const) where
 
-import Prelude hiding ((.), ($), id, flip)
+import Prelude hiding ((.), ($), id, flip, const)
 
--- | Constructor for expression info, QED and Postulate.
-data SideExprInfo = L ExprInfo | R ExprInfo  | QED | Postulate
--- | Constructor for expression info
-data ExprInfo =     Def String | Prop String | Inst String | Beta | Eta | DefRec String Integer
+-- | Tactic annotation for the conversion
+data Tactic = L Rewrite | R Rewrite  | QED | Postulate
+-- | Rewrite rule applied to the expression
+data Rewrite = Def String | Prop String | Inst String | Beta | Eta | DefRec String Integer
 
--- | Operator for adding annotation to expression
-(--.) :: a -> SideExprInfo -> a
+-- | Operator for adding Tactic annotation to the conversion
+(--.) :: a -> Tactic -> a
 (--.) x _ = x
 
--- | Main operator for checking type equality and combining expressions into chain.
+-- | Main operator for building conversion chain
 infixl 0 ===
 (===) :: a -> a -> a
 (===) _ y = y
