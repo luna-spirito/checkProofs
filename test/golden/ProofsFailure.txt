@@ -1,0 +1,16 @@
+ANALUZING FILE: examples/ProofsFailure.hs
+
+
+============================================
+================== REPORT ==================
+Succsessfully proved: 0
+  <None>
+
+Failures proved: 2
+  fish2_skipStep
+  monad2LawArrow_wrongDef
+
+============================================
+
+
+===== The End: App/Main =====

@@ -1,0 +1,20 @@
+ANALUZING FILE: examples/MyMonadArrow.hs
+
+
+============================================
+================== REPORT ==================
+Succsessfully proved: 6
+  monad1LawArrow
+  monad1LawEither
+  monad2LawArrow
+  monad2LawEither
+  monad3LawArrow
+  monad3LawEither
+
+Failures proved: 0
+  <None>
+
+============================================
+
+
+===== The End: App/Main =====

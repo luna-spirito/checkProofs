@@ -1,0 +1,89 @@
+ANALUZING FILE: examples/AllGoodExamples.hs
+
+
+============================================
+================== REPORT ==================
+Succsessfully proved: 75
+  a0
+  a1
+  a2
+  a3
+  a4
+  ap0LawEither
+  ap0LawMaybe
+  ap1LawEither
+  ap1LawMaybe
+  ap2LawEither
+  ap2LawMaybe
+  ap3LawEither
+  ap3LawMaybe
+  ap4LawEither
+  ap4LawMaybe
+  app0LawArrow
+  app1Law
+  app2LawArrow
+  app3LawArrow
+  app4LawArrow
+  composeAssoc
+  composeLeftNeutral
+  composeRightNeutral
+  f1
+  f2
+  f2fromf1
+  fishAssoc
+  fishLeftNeutral
+  fishRightNeutral
+  flipFlipIsId
+  flipFlipIsId'
+  fmapFREE
+  functor1LawArrow
+  functor1LawCmps
+  functor1LawEither
+  functor1LawList
+  functor1LawMaybe
+  functor1LawPair
+  functor2LawArrow
+  functor2LawCmps
+  functor2LawEither
+  functor2LawList
+  functor2LawMaybe
+  functor2LawPair
+  functor2LawState
+  lemma1_tha3
+  lemma1_tha4
+  lemma2_tha3
+  lemma2_tha4
+  lemma_JJ2J
+  lemma_JJ2J_eth
+  liftA_f1
+  liftA_f2
+  m1
+  m2
+  m3
+  mjfr1
+  mjfr2
+  mjfr3
+  monad1LawArrow
+  monad1LawEither
+  monad1LawMaybe
+  monad2LawArrow
+  monad2LawEither
+  monad2LawMaybe
+  monad3LawArrow
+  monad3LawEither
+  monad3LawMaybe
+  theoremApplicative0
+  theoremApplicative1
+  theoremApplicative2
+  theoremApplicative3
+  theoremApplicative4
+  theoremFunctor1
+  theoremFunctor2
+
+Failures proved: 0
+  <None>
+
+============================================
+
+
+===== The End: App/Main =====

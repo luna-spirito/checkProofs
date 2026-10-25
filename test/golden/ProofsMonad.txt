@@ -1,0 +1,37 @@
+ANALUZING FILE: examples/ProofsMonad.hs
+
+
+============================================
+================== REPORT ==================
+Succsessfully proved: 23
+  fishAssoc
+  fishLeftNeutral
+  fishRightNeutral
+  lemma1_tha3
+  lemma1_tha4
+  lemma2_tha3
+  lemma2_tha4
+  m1
+  m2
+  m3
+  mjfr1
+  mjfr2
+  mjfr3
+  monad1LawMaybe
+  monad2LawMaybe
+  monad3LawMaybe
+  theoremApplicative0
+  theoremApplicative1
+  theoremApplicative2
+  theoremApplicative3
+  theoremApplicative4
+  theoremFunctor1
+  theoremFunctor2
+
+Failures proved: 0
+  <None>
+
+============================================
+
+
+===== The End: App/Main =====

@@ -1,0 +1,19 @@
+ANALUZING FILE: examples/Compose.hs
+
+
+============================================
+================== REPORT ==================
+Succsessfully proved: 5
+  composeAssoc
+  composeLeftNeutral
+  composeRightNeutral
+  flipFlipIsId
+  flipFlipIsId'
+
+Failures proved: 0
+  <None>
+
+============================================
+
+
+===== The End: App/Main =====

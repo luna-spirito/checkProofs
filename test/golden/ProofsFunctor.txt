@@ -1,0 +1,31 @@
+ANALUZING FILE: examples/ProofsFunctor.hs
+
+
+============================================
+================== REPORT ==================
+Succsessfully proved: 17
+  f1
+  f2
+  f2fromf1
+  fmapFREE
+  functor1LawArrow
+  functor1LawCmps
+  functor1LawEither
+  functor1LawList
+  functor1LawMaybe
+  functor1LawPair
+  functor2LawArrow
+  functor2LawCmps
+  functor2LawEither
+  functor2LawList
+  functor2LawMaybe
+  functor2LawPair
+  functor2LawState
+
+Failures proved: 1
+  functor1LawState
+
+============================================
+
+
+===== The End: App/Main =====

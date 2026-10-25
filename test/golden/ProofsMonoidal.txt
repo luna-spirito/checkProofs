@@ -1,0 +1,44 @@
+ANALUZING FILE: examples/ProofsMonoidal.hs
+
+
+============================================
+================== REPORT ==================
+Succsessfully proved: 7
+  lemmaML3'
+  lemmaML3''
+  lemmaML3'''
+  ml1
+  ml2
+  ml3
+  ml4
+
+Failures proved: 24
+  appLaw0
+  appLaw2
+  appLaw3
+  appLaw4'
+  isoTriple
+  isoTriple'
+  lLemma
+  lem0'
+  lem0''
+  lem1
+  lem2
+  lemmaAL0
+  lemmaAL2
+  lemmaAL3
+  lemmaML2
+  lrLemma
+  ml3'
+  monLaw1
+  monLaw2
+  monLaw3
+  mono1LawMaybe
+  mono2LawMaybe
+  mono3LawMaybe
+  rLemma
+
+============================================
+
+
+===== The End: App/Main =====

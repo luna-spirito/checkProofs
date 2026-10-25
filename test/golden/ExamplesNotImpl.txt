@@ -1,0 +1,20 @@
+ANALUZING FILE: examples/ExamplesNotImpl.hs
+
+
+============================================
+================== REPORT ==================
+Succsessfully proved: 0
+  <None>
+
+Failures proved: 6
+  app0LawCmps
+  app2LawCmps
+  app3LawCmps
+  app4LawCmps
+  functor1LawState
+  lemma0
+
+============================================
+
+
+===== The End: App/Main =====

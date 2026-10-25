@@ -53,23 +53,17 @@ extra-doc-files:    CHANGELOG.md
 common warnings
     ghc-options: -Wall
 
-executable checkProofs
+library
     -- Import common warning flags.
     import:           warnings
 
-    -- .hs or .lhs file containing the Main module.
-    main-is:          Main.hs
-
-    -- Modules included in this executable, other than Main.
-    other-modules:
+    -- Modules exposed from the library.
+    exposed-modules:
         PrettyString
         AstInfo
         SortDecls
         ProofBase
         CheckProofs
-
-    -- LANGUAGE extensions used by modules in this package.
-    -- other-extensions:
 
     -- Other library packages from which modules are imported.
     build-depends:
@@ -83,9 +77,48 @@ executable checkProofs
         filepath   ^>=1.5.4.0
 
     -- Directories containing source files.
-    hs-source-dirs:   
-        app
-        src
+    hs-source-dirs:   src
+
+    -- Base language which the package is written in.
+    default-language: Haskell2010
+
+executable checkProofs
+    -- Import common warning flags.
+    import:           warnings
+
+    -- .hs or .lhs file containing the Main module.
+    main-is:          Main.hs
+
+    -- Other library packages from which modules are imported.
+    build-depends:
+        checkProofs,
+        base        ^>=4.21.0.0,
+        filepath    ^>=1.5.4.0
+
+    -- Directories containing source files.
+    hs-source-dirs:   app
+
+    -- Base language which the package is written in.
+    default-language: Haskell2010
+
+test-suite golden-tests
+    -- Import common warning flags.
+    import:           warnings
+
+    type:             exitcode-stdio-1.0
+
+    -- .hs or .lhs file containing the Main module.
+    main-is:          Golden.hs
+
+    -- Other library packages from which modules are imported.
+    build-depends:
+        checkProofs,
+        base        ^>=4.21.0.0,
+        directory   >=1.3 && <1.4,
+        filepath    ^>=1.5.4.0
+
+    -- Directories containing source files.
+    hs-source-dirs:   test
 
     -- Base language which the package is written in.
     default-language: Haskell2010

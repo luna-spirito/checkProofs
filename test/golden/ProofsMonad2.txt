@@ -1,0 +1,38 @@
+ANALUZING FILE: examples/ProofsMonad2.hs
+
+
+============================================
+================== REPORT ==================
+Succsessfully proved: 24
+  composeAssoc
+  composeLeftNeutral
+  composeRightNeutral
+  f1
+  f2
+  fAss
+  fLN
+  fLR
+  fish1
+  fish2
+  fish3
+  fishFREE
+  joinFREE
+  m1'
+  m1''
+  m2'
+  m2''
+  m3'
+  m3''
+  mjfr1
+  mjfr2
+  mjfr3
+  mjfr3Short
+  returnFREE
+
+Failures proved: 0
+  <None>
+
+============================================
+
+
+===== The End: App/Main =====

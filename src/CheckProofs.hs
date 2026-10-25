@@ -50,7 +50,11 @@ proofbasePath :: FilePath
 proofbasePath = "src" </> "ProofBase.hs"
 
 checkProofs :: String -> IO ()
-checkProofs filePath = do
+checkProofs filePath = putStr =<< checkProofsReport filePath
+
+-- | Run the checker on the file and return everything 'checkProofs' prints to stdout
+checkProofsReport :: String -> IO String
+checkProofsReport filePath = do
   runGhc (Just libdir) $ do
     dflags' <- getSessionDynFlags
     let dflags = gopt_set dflags' Opt_EnableRewriteRules
@@ -59,7 +63,6 @@ checkProofs filePath = do
 
     let analyzing_file_str = "ANALUZING FILE: " ++ filePath ++ "\n"
     liftIO $ writeFile logPath analyzing_file_str
-    liftIO $ putStrLn analyzing_file_str
     (mg_main, mg_base) <- getModulesGuts filePath
 
     -- logMsg "\n=== Core mg_binds ===\n"
@@ -70,10 +73,10 @@ checkProofs filePath = do
     -- logMsg "\n===== Collected AstState =====\n"
     -- logMsg $ prettyString astState
     -- logMsg "\n===== End AstState =====\n"
-    _ <- liftIO $ analyzeModuleSt astState
+    report <- liftIO $ analyzeModuleSt astState
 
-    logMsg            "\n===== The End: App/Main ====="
-    liftIO $ putStrLn "\n===== The End: App/Main ====="
+    logMsg "\n===== The End: App/Main ====="
+    return (analyzing_file_str ++ "\n" ++ report ++ "\n" ++ "\n===== The End: App/Main =====\n")
 
 
 
@@ -263,14 +266,14 @@ madePostulate fn_id =
 
 
 ------ Analyze
--- | Main analyzing entry function
-analyzeModuleSt :: CheckerST -> IO ()
+-- | Main analyzing entry function. Returns the report printed by 'checkProofs'
+analyzeModuleSt :: CheckerST -> IO String
 analyzeModuleSt checkerST =
 
   do
     result <- mapPassStM runChecker (st_declconvrs checkerST) checkerST
-    logMsg   $ prettyStringReport True  $ toReport result
-    putStrLn $ prettyStringReport False $ toReport result
+    logMsg $ prettyStringReport True $ toReport result
+    return $ prettyStringReport False $ toReport result
 
   where
     runChecker x = runStateT (runExceptT (analyzeDeclCnvrs x))

@@ -1,0 +1,44 @@
+ANALUZING FILE: examples/ProofsApplicative.hs
+
+
+============================================
+================== REPORT ==================
+Succsessfully proved: 27
+  a0
+  a1
+  a2
+  a3
+  a4
+  ap0LawEither
+  ap0LawMaybe
+  ap1LawEither
+  ap1LawMaybe
+  ap2LawEither
+  ap2LawMaybe
+  ap3LawEither
+  ap3LawMaybe
+  ap4LawEither
+  ap4LawMaybe
+  app0LawArrow
+  app1Law
+  app2LawArrow
+  app3LawArrow
+  app4LawArrow
+  f1
+  f2
+  lemma0
+  lemma_JJ2J
+  lemma_JJ2J_eth
+  liftA_f1
+  liftA_f2
+
+Failures proved: 4
+  app0LawCmps
+  app2LawCmps
+  app3LawCmps
+  app4LawCmps
+
+============================================
+
+
+===== The End: App/Main =====

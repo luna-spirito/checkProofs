@@ -19,7 +19,7 @@ import GHC.Utils.Outputable
       showSDocUnsafe,
       IsDoc(($$)) )
 
-import Data.List (intercalate)
+import Data.List (intercalate, sort, sortOn)
 
 import AstInfo
 import ProofBase ( Rewrite(..), Tactic(..) )
@@ -100,6 +100,10 @@ prettyString = showSDocUnsafe . ppr
 
 -- type Report = ([Id], [(Id, String)])
 -- Bool - with reasons or without
+--
+-- The names are sorted here: the original order comes from a topological sort
+-- whose traversal order is not stable between runs (it depends on GHC uniques),
+-- so only the sorted report is deterministic enough for golden tests.
 prettyStringReport :: Bool -> Report -> String
 prettyStringReport withReasons (succs, failsWithReasons) =
   "\n============================================" ++
@@ -112,5 +116,5 @@ prettyStringReport withReasons (succs, failsWithReasons) =
   ++ "============================================\n"
   where
     prettyRes [] = "0" ++ "\n  " ++ "<None>"
-    prettyRes xs = show (length xs) ++ "\n  " ++ intercalate "\n  " (map prettyString xs)
-    (fails, reasons) = unzip failsWithReasons
+    prettyRes xs = show (length xs) ++ "\n  " ++ intercalate "\n  " (sort (map prettyString xs))
+    (fails, reasons) = unzip (sortOn (prettyString . fst) failsWithReasons)
