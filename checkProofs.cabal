@@ -74,7 +74,8 @@ library
         uniplate   ^>=1.6.13,
         bytestring ^>=0.12.2.0,
         containers ^>=0.7,
-        filepath   ^>=1.5.4.0
+        filepath   ^>=1.5.4.0,
+        template-haskell
 
     -- Directories containing source files.
     hs-source-dirs:   src

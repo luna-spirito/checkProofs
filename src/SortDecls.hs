@@ -6,8 +6,7 @@ Topologicaly sort DeclConversions and check for cyrcle dependencies
 -}
 module SortDecls (sorteDeclConvrs) where
 
-import GHC (Id, getOccName)
-import GHC.Types.Name.Occurrence (occNameString)
+import GHC (Id)
 import Data.Graph
 import Data.Maybe (mapMaybe)
 import Data.List (find)
@@ -15,13 +14,10 @@ import Data.List.NonEmpty (toList)
 
 import AstInfo
 import PrettyString
-import ProofBase ( Rewrite(..), Tactic(..) )
+import ProofBase ( RewriteN(..), TacticN(..) )
 
 sorteDeclConvrs :: [DeclConversions] -> Either Cyrcles [DeclConversions]
 sorteDeclConvrs declConvrs = topoSort $ toNodes declConvrs
-
-cmpIdString :: String -> Id -> Bool
-cmpIdString str var = occNameString (getOccName var) == str
 
 --            (value,              key, depend_on)
 type EdgeDC = (DeclConversions,    Id,  [Id])
@@ -31,17 +27,17 @@ toNodes :: [DeclConversions] -> [EdgeDC]
 toNodes decls = map (\dc@(decl_id, cnvrs) -> (dc, decl_id, cnInfoStr cnvrs)) decls
   where
     cnInfoStr :: [Conversion] -> [Id]
-    cnInfoStr = mapMaybe (rewriteToStr . cnToRewrite)
-    rewriteToStr cnvr = case cnvr of
-      Just (Def  s) -> findIdByStr s
-      Just (Prop s) -> findIdByStr s
-      _             -> Nothing
+    cnInfoStr = mapMaybe (rewriteToId . cnToRewrite)
+    rewriteToId cnvr = case cnvr of
+      Just (Def  nm) -> findIdByName nm
+      Just (Prop nm) -> findIdByName nm
+      _              -> Nothing
     cnToRewrite  cnvr = case cn_info cnvr of
       L ei -> Just ei
       R ei -> Just ei
       Postulate -> Nothing
       info -> error $ "Unexpected comment for conversion. Expected L or R. Got:" ++ prettyString info
-    findIdByStr s_id = find (cmpIdString s_id) (map fst decls)
+    findIdByName nm = find (nameMatchesId nm) (map fst decls)
 
 
 

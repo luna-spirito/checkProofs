@@ -1,3 +1,4 @@
+{-# LANGUAGE TemplateHaskellQuotes #-}
 module ProofsMonad2 where
 import ProofBase
 -- import Compose (composeAssoc, composeLeftNeutral)  -- Нужно только для пруфчекенга, живет в комментариях
@@ -96,45 +97,45 @@ joinFREE j f =
 -- (m1)    ret a >>= k  ===  k a
 m1'  :: AltMonad m => (a -> m b) -> a -> m b 
 m1' k a = 
-     (ret a `bind` k)           --. L (Def  "bind")
- === ((joi . fmap k) (ret a))   --. R (Def  ".")
- === (((joi . fmap k) . ret) a) --. R (Prop "composeAssoc")
- === ((joi . (fmap k . ret)) a) --. L (Prop "returnFREE")
- === ((joi . (ret . k)) a)      --. L (Prop "composeAssoc")
- === (((joi . ret) . k) a)      --. L (Prop "mjfr1")
- === ((id . k) a)               --. L (Def  ".")
- === (id (k a))                 --. L (Def  "id")
+     (ret a `bind` k)           --. L (Def  'bind)
+ === ((joi . fmap k) (ret a))   --. R (Def  '(.))
+ === (((joi . fmap k) . ret) a) --. R (Prop 'composeAssoc)
+ === ((joi . (fmap k . ret)) a) --. L (Prop 'returnFREE)
+ === ((joi . (ret . k)) a)      --. L (Prop 'composeAssoc)
+ === (((joi . ret) . k) a)      --. L (Prop 'mjfr1)
+ === ((id . k) a)               --. L (Def  '(.))
+ === (id (k a))                 --. L (Def  'id)
  === k a                        --. QED
 ---
 
 -- (m2)    m >>= ret  ===  m 
 m2'  :: AltMonad m => m a -> m a 
 m2' m = 
-     (m `bind` ret)        --. L (Def  "bind")
- === ((joi . fmap ret) m)  --. L (Prop "mjfr2")
- === id m                  --. L (Def  "id")
+     (m `bind` ret)        --. L (Def  'bind)
+ === ((joi . fmap ret) m)  --. L (Prop 'mjfr2)
+ === id m                  --. L (Def  'id)
  === m                     --. QED
 ---
 -- (m3)    (m >>= v) >>= w  ===  m >>= (\x -> v x >>= w)
 m3' :: AltMonad m => m a -> (a -> m b) -> (b -> m c) -> m c
 m3' m v w =
-     (m `bind` v) `bind` w                         --. L (Def  "bind")
- === (joi . fmap w) (m `bind` v)                   --. L (Def  "bind")
- === (joi . fmap w) ((joi . fmap v) m)             --. R (Def  ".")
- === ((joi . fmap w) . joi . fmap v) m             --. R (Prop "composeAssoc")
- === (joi . fmap w . joi . fmap v) m               --. L (Prop "composeAssoc")
- === (joi . (fmap w . joi) . fmap v) m             --. R (Prop "joinFREE")
- === (joi . (joi . fmap (fmap w)) . fmap v) m      --. R (Prop "composeAssoc")
- === (joi . joi . fmap (fmap w) . fmap v) m        --. L (Prop "composeAssoc")
- === ((joi . joi) . fmap (fmap w) . fmap v) m      --. R (Prop "mjfr3Short")
- === ((joi . fmap joi) . fmap (fmap w) . fmap v) m --. R (Prop "composeAssoc")
- === (joi . fmap joi . fmap (fmap w) . fmap v) m   --. R (Prop "f2")
- === (joi . fmap joi . fmap (fmap w . v)) m        --. R (Prop "f2")
- === (joi . fmap (joi . fmap w . v)) m             --. R (Def  "bind")
+     (m `bind` v) `bind` w                         --. L (Def  'bind)
+ === (joi . fmap w) (m `bind` v)                   --. L (Def  'bind)
+ === (joi . fmap w) ((joi . fmap v) m)             --. R (Def  '(.))
+ === ((joi . fmap w) . joi . fmap v) m             --. R (Prop 'composeAssoc)
+ === (joi . fmap w . joi . fmap v) m               --. L (Prop 'composeAssoc)
+ === (joi . (fmap w . joi) . fmap v) m             --. R (Prop 'joinFREE)
+ === (joi . (joi . fmap (fmap w)) . fmap v) m      --. R (Prop 'composeAssoc)
+ === (joi . joi . fmap (fmap w) . fmap v) m        --. L (Prop 'composeAssoc)
+ === ((joi . joi) . fmap (fmap w) . fmap v) m      --. R (Prop 'mjfr3Short)
+ === ((joi . fmap joi) . fmap (fmap w) . fmap v) m --. R (Prop 'composeAssoc)
+ === (joi . fmap joi . fmap (fmap w) . fmap v) m   --. R (Prop 'f2)
+ === (joi . fmap joi . fmap (fmap w . v)) m        --. R (Prop 'f2)
+ === (joi . fmap (joi . fmap w . v)) m             --. R (Def  'bind)
  === (m `bind` (joi . fmap w . v))                 --. R Eta
  === (m `bind` (\x -> (joi . fmap w . v) x))       --. Postulate
- === (m `bind` (\x -> ((joi . fmap w) . v) x))     --. L (Def  ".")
- === (m `bind` (\x -> (joi . fmap w) (v x)))       --. R (Def  "bind")
+ === (m `bind` (\x -> ((joi . fmap w) . v) x))     --. L (Def  '(.))
+ === (m `bind` (\x -> (joi . fmap w) (v x)))       --. R (Def  'bind)
  === (m `bind` (\x -> v x `bind` w))               --. QED
 
 
@@ -162,41 +163,41 @@ g >=>.. h = joi . fmap h . g
 -- (fish1)  ret >=> k  ===  k
 fish1 :: AltMonad m => (a -> m b) -> a -> m b
 fish1 k = 
-     (ret >=>.. k)        --. L (Def  ">=>..")
- === (joi . fmap k . ret) --. L (Prop "returnFREE")
- === (joi . ret . k)      --. L (Prop "composeAssoc")
- === ((joi . ret) . k)    --. L (Prop "mjfr1")
- === (id . k)             --. L (Prop "composeLeftNeutral")-- [Compose.composeLeftNeutral]
+     (ret >=>.. k)        --. L (Def  '(>=>..))
+ === (joi . fmap k . ret) --. L (Prop 'returnFREE)
+ === (joi . ret . k)      --. L (Prop 'composeAssoc)
+ === ((joi . ret) . k)    --. L (Prop 'mjfr1)
+ === (id . k)             --. L (Prop 'composeLeftNeutral)-- [Compose.composeLeftNeutral]
  === k                    --. QED
  --
 
 -- (fish2)  k >=> ret  ===  k
 fish2 :: AltMonad m => (a -> m b) -> a -> m b
 fish2 k = 
-     (k >=>.. ret)          --. L (Def  ">=>..")
- === (joi . fmap ret . k)   --. L (Prop "composeAssoc")
- === ((joi . fmap ret) . k) --. L (Prop "mjfr2")
- === (id . k)               --. L (Prop "composeLeftNeutral")-- [Compose.composeLeftNeutral]
+     (k >=>.. ret)          --. L (Def  '(>=>..))
+ === (joi . fmap ret . k)   --. L (Prop 'composeAssoc)
+ === ((joi . fmap ret) . k) --. L (Prop 'mjfr2)
+ === (id . k)               --. L (Prop 'composeLeftNeutral)-- [Compose.composeLeftNeutral]
  === k                      --. QED
 --
 
 -- (fish3)  (u >=> v) >=> w  ===  u >=> (v >=> w)
 fish3 :: AltMonad m => (a -> m b) -> (b -> m c) -> (c -> m d) -> a -> m d
 fish3 u v w =
-     ((u >=>.. v) >=>.. w)                           --. L (Def  ">=>..")
- === (joi . fmap w . (u >=>.. v))                    --. L (Def  ">=>..")
- === (joi . fmap w . joi . fmap v . u)               --. L (Prop "composeAssoc")
- === (joi . (fmap w . joi) . fmap v . u)             --. R (Prop "joinFREE")
- === (joi . (joi . fmap (fmap w)) . fmap v . u)      --. R (Prop "composeAssoc")
- === (joi . joi . fmap (fmap w) . fmap v . u)        --. L (Prop "composeAssoc")
- === ((joi . joi) . fmap (fmap w) . fmap v . u)      --. R (Prop "mjfr3Short")
- === ((joi . fmap joi) . fmap (fmap w) . fmap v . u) --. R (Prop "composeAssoc")
- === (joi . fmap joi . fmap (fmap w) . fmap v . u)   --. L (Prop "composeAssoc")
- === (joi . fmap joi . (fmap (fmap w) . fmap v) . u) --. R (Prop "f2")
- === (joi . fmap joi . fmap ((fmap w) . v) . u)      --. L (Prop "composeAssoc")
- === (joi . (fmap joi . fmap ((fmap w) . v)) . u)    --. R (Prop "f2")
- === (joi . fmap (joi . fmap w . v) . u)             --. R (Def  ">=>..")
- === (joi . fmap (v >=>.. w) . u)                    --. R (Def  ">=>..")
+     ((u >=>.. v) >=>.. w)                           --. L (Def  '(>=>..))
+ === (joi . fmap w . (u >=>.. v))                    --. L (Def  '(>=>..))
+ === (joi . fmap w . joi . fmap v . u)               --. L (Prop 'composeAssoc)
+ === (joi . (fmap w . joi) . fmap v . u)             --. R (Prop 'joinFREE)
+ === (joi . (joi . fmap (fmap w)) . fmap v . u)      --. R (Prop 'composeAssoc)
+ === (joi . joi . fmap (fmap w) . fmap v . u)        --. L (Prop 'composeAssoc)
+ === ((joi . joi) . fmap (fmap w) . fmap v . u)      --. R (Prop 'mjfr3Short)
+ === ((joi . fmap joi) . fmap (fmap w) . fmap v . u) --. R (Prop 'composeAssoc)
+ === (joi . fmap joi . fmap (fmap w) . fmap v . u)   --. L (Prop 'composeAssoc)
+ === (joi . fmap joi . (fmap (fmap w) . fmap v) . u) --. R (Prop 'f2)
+ === (joi . fmap joi . fmap ((fmap w) . v) . u)      --. L (Prop 'composeAssoc)
+ === (joi . (fmap joi . fmap ((fmap w) . v)) . u)    --. R (Prop 'f2)
+ === (joi . fmap (joi . fmap w . v) . u)             --. R (Def  '(>=>..))
+ === (joi . fmap (v >=>.. w) . u)                    --. R (Def  '(>=>..))
  === (u >=>.. (v >=>.. w))                           --. QED
 -- mjfr3  = 
 --      (joi . fmap joi) === (joi . joi)       --. QED
@@ -270,32 +271,32 @@ fishFREE k1 k2 =
 -- return a >>== k   ===  k a
 m1'' :: MonadFish m => a -> (a -> m b) -> m b
 m1'' a k =
-     (retu a >>== k)          --. L (Def  ">>==")
- === ((id >==> k) (retu a))   --. R (Def  ".")
- === (((id >==> k) . retu) a) --. L (Prop "fishFREE")
- === ((retu >==> k) a)        --. L (Prop "fLN")
+     (retu a >>== k)          --. L (Def  '(>>==))
+ === ((id >==> k) (retu a))   --. R (Def  '(.))
+ === (((id >==> k) . retu) a) --. L (Prop 'fishFREE)
+ === ((retu >==> k) a)        --. L (Prop 'fLN)
  === k a                      --. QED
 
 -- m >>== return  ===  m  
 m2'' :: MonadFish m => m a -> m a
 m2'' m =  
-     (m >>== retu)      --. L (Def  ">>==")
- === ((id >==> retu) m) --. L (Prop "fLR")
- === id m               --. L (Def  "id")
+     (m >>== retu)      --. L (Def  '(>>==))
+ === ((id >==> retu) m) --. L (Prop 'fLR)
+ === id m               --. L (Def  'id)
  === m                  --. QED
 
 -- (m >>== k1) >>== k2   ===   m >>== (\x -> k1 x >>== k2)
 m3'' :: MonadFish m => m a -> (a -> m b) -> (b -> m c) -> m c
 m3'' m k1 k2 = 
-     ((m >>== k1) >>== k2)                --. L (Def  ">>==")
- === ((id >==> k1) m >>== k2)             --. L (Def  ">>==")
- === ((id >==> k2) ((id >==> k1) m))      --. R (Def  ".")
- === (((id >==> k2) . (id >==> k1)) m)    --. L (Prop "fishFREE") 
- === (((id >==> k1) >==> k2) m)           --. L (Prop "fAss")
- === ((id >==> (k1 >==> k2)) m)           --. R (Def  ">>==")
- === (m >>== (k1 >==> k2))                --. R (Prop "fishFREE")
- === (m >>== (id >==> k2) . k1)           --. L (Def  ".")
- === (m >>== (\x -> (id >==> k2) (k1 x))) --. R (Def  ">>==")
+     ((m >>== k1) >>== k2)                --. L (Def  '(>>==))
+ === ((id >==> k1) m >>== k2)             --. L (Def  '(>>==))
+ === ((id >==> k2) ((id >==> k1) m))      --. R (Def  '(.))
+ === (((id >==> k2) . (id >==> k1)) m)    --. L (Prop 'fishFREE) 
+ === (((id >==> k1) >==> k2) m)           --. L (Prop 'fAss)
+ === ((id >==> (k1 >==> k2)) m)           --. R (Def  '(>>==))
+ === (m >>== (k1 >==> k2))                --. R (Prop 'fishFREE)
+ === (m >>== (id >==> k2) . k1)           --. L (Def  '(.))
+ === (m >>== (\x -> (id >==> k2) (k1 x))) --. R (Def  '(>>==))
  === (m >>== (\x -> k1 x >>== k2))        --. QED
 
 
@@ -307,25 +308,25 @@ m3'' m k1 k2 =
 --  Compose
 composeAssoc :: (c -> d) -> (b -> c) -> (a -> b) -> a -> d
 composeAssoc f g h = 
-     (f . (g . h))                   --. L (Def  ".")
- === (\x -> f ((g . h) x))           --. L (Def  ".")
+     (f . (g . h))                   --. L (Def  '(.))
+ === (\x -> f ((g . h) x))           --. L (Def  '(.))
  === (\x -> f ((\x' -> g (h x')) x)) --. L Beta 
  === (\x -> f (g (h x)))             --. L Beta 
- === (\x -> (\x' -> f (g x')) (h x)) --. R (Def  ".")
- === (\x -> (f . g) (h x))           --. R (Def  ".")
+ === (\x -> (\x' -> f (g x')) (h x)) --. R (Def  '(.))
+ === (\x -> (f . g) (h x))           --. R (Def  '(.))
  === ((f . g) . h)                   --. QED
 
 composeLeftNeutral :: (a -> b) -> a -> b
 composeLeftNeutral f =
-     (id . f)          --. L (Def  ".")
- === (\x -> id (f x))  --. L (Def  "id")
+     (id . f)          --. L (Def  '(.))
+ === (\x -> id (f x))  --. L (Def  'id)
  === (\x -> f x)       --. L Eta
  === f                 --. QED
 
 composeRightNeutral :: (a -> b) -> a -> b
 composeRightNeutral f =
-     (f . id)          --. L (Def  ".")
- === (\x -> f (id x))  --. L (Def  "id")
+     (f . id)          --. L (Def  '(.))
+ === (\x -> f (id x))  --. L (Def  'id)
  === (\x -> f x)       --. L Eta
  === f                 --. QED
 

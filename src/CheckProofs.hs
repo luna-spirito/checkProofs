@@ -39,7 +39,7 @@ import GHC.Core.SimpleOpt ( defaultSimpleOpts, simpleOptExpr )
 
 import AstInfo
 import PrettyString
-import ProofBase ( Rewrite(..), Tactic(..) )
+import ProofBase ( RewriteN(..), TacticN(..) )
 import SortDecls ( sorteDeclConvrs )
 
 
@@ -132,11 +132,7 @@ collectConvrs (f_id, f_body) = case map getConvrs pairs_skip_lhe_qed of
     (App (App (App (Var exprName) _) argExpr) argComm) <- universe f_body,
     "--." <- [getStrById exprName] ]
   pairs  = zip argAddInfo (drop 1 argAddInfo)
-  pairs_skip_lhe_qed = filter (\((_, v_cmnt), _) ->
-    case v_cmnt of
-      (Var cmnt) | getStrById cmnt == "QED" -> False
-      _ -> True
-    ) pairs
+  pairs_skip_lhe_qed = filter (\((_, v_cmnt), _) -> not (isTacticCon "QED" v_cmnt)) pairs
   getConvrs ((lhe, c1), (rhe, _)) = Conversion lhe rhe (toTactic c1)
 ---- END COLLECTING AST STATE
 
@@ -155,26 +151,60 @@ createFail CheckerST{..} reason = (,) d_id $
 getStrById :: Id -> String
 getStrById v = occNameString (getOccName v)
 
-toTactic :: CoreExpr -> Tactic
-toTactic (App (Var expr_side) expr_info) = toSideInfo (toRewrite expr_info)
+-- | Is the expression an application of a tactic data constructor?
+-- Polymorphic constructors are applied to a type first in Core (@QED \@\@n@).
+isTacticCon :: String -> CoreExpr -> Bool
+isTacticCon str expr = case collectArgs expr of
+  (Var v, _) -> getStrById v == str
+  _          -> False
+
+-- | Value arguments of an application spine, without type instantiations
+valArgsOf :: [CoreExpr] -> [CoreExpr]
+valArgsOf = filter (\case Type _ -> False; _ -> True)
+
+toTactic :: CoreExpr -> TacticN NameRef
+toTactic tactic_expr =
+  case collectArgs tactic_expr of
+    (Var side, args) -> case (getStrById side, valArgsOf args) of
+      ("L", [info])     -> L  (toRewrite info)
+      ("R", [info])     -> R  (toRewrite info)
+      ("Postulate", []) -> Postulate
+      _                 -> err
+    _ -> err
   where
-  toSideInfo
-    | getStrById expr_side == "L" = L
-    | getStrById expr_side == "R" = R
-    | otherwise = err "`L` or `R`" expr_side
-  toRewrite (Var v)
-    | getStrById v == "Beta" = Beta
-    | getStrById v == "Eta"  = Eta
-  toRewrite (App (Var v_id) (App _ (Lit (LitString pack_str))))
-    | getStrById v_id == "Def"  = Def  $ BS8.unpack pack_str
-    | getStrById v_id == "Prop" = Prop $ BS8.unpack pack_str
-    | getStrById v_id == "Inst" = Inst $ BS8.unpack pack_str
-  toRewrite (App (App (Var v_id) (App _ (Lit (LitString pack_str)))) (App _ (Lit (LitNumber _ n))))
-    | getStrById v_id == "DefRec" && n > 0 = DefRec (BS8.unpack pack_str) n
-  toRewrite _ = err "`Beta`, `Eta`, `Def  comment`, `Prop comment`, `Inst comment` or DefRec comment n > 0" expr_info
-  err str_expect e = error $ "Unexpected expression structure for comment, expected " ++ str_expect ++ ".\nGot: " ++ prettyString e
-toTactic (Var expr_side) | getStrById expr_side == "Postulate" = Postulate
-toTactic e = error $ "Unexpected expression structure for comment, expected a function application with a string literal argument.\nGot: " ++ prettyString e
+    err = error $ "Unexpected expression structure for tactic, expected `L` or `R` applied to a rewrite, or `Postulate`.\nGot: " ++ prettyString tactic_expr
+
+-- | Polymorphic rewrite constructors are applied to a type first
+-- in Core (@Def \@\@n \'id@), so match on the application spine
+-- with the type instantiations stripped.
+toRewrite :: CoreExpr -> RewriteN NameRef
+toRewrite rw_expr =
+  case collectArgs rw_expr of
+    (Var con, args) -> case (getStrById con, valArgsOf args) of
+      ("Beta", [])    -> Beta
+      ("Eta", [])     -> Eta
+      ("Def", [nm])   -> Def  (nameRefFromCore nm)
+      ("Prop", [nm])  -> Prop (nameRefFromCore nm)
+      ("Inst", [nm])  -> Inst (nameRefFromCore nm)
+      ("DefRec", [nm, App _ (Lit (LitNumber _ n))]) | n > 0 -> DefRec (nameRefFromCore nm) n
+      _               -> err
+    _ -> err
+  where
+    err = error $ "Unexpected expression structure for rewrite, expected `Beta`, `Eta`, `Def 'name`, `Prop 'name`, `Inst 'name` or `DefRec 'name n > 0`.\nGot: " ++ prettyString rw_expr
+
+-- | Recover a quoted name from its desugared TH quote in Core:
+-- @mkNameG_v \"pkg\" \"module\" \"occname\"@
+nameRefFromCore :: CoreExpr -> NameRef
+nameRefFromCore name_expr =
+  case name_expr of
+    App (App (App (Var v) (App _ (Lit (LitString pkg))))
+                (App _ (Lit (LitString modul))))
+                (App _ (Lit (LitString occ)))
+      | getStrById v == "mkNameG_v" ->
+          NameRef { nrOcc = BS8.unpack occ
+                  , nrMod = Just (BS8.unpack modul)
+                  , nrPkg = Just (BS8.unpack pkg) }
+    _ -> error $ "Unexpected expression structure for quoted name.\nGot: " ++ prettyString name_expr
 
 {-|
 -- assume that any variable in convertion is OR
@@ -367,7 +397,7 @@ getFirstDiff contrl_expr expr =
         logMsg $ "Get diff:\n  cntr_expr: " ++ prettyString ce ++ "\n       expr: " ++ prettyString e ++ "\n"
         return (e, id, is_collect)
 
-getNAppearance :: String -> Integer -> CoreExpr -> CheckerM (CoreExpr, CoreExpr -> CoreExpr)
+getNAppearance :: NameRef -> Integer -> CoreExpr -> CheckerM (CoreExpr, CoreExpr -> CoreExpr)
 getNAppearance comnt m expr = go m expr >>= (\(x, y, _) -> return (x, y))
   where
     go n (Lam b body) = go n body <&> updBuilder (Lam b .)
@@ -376,7 +406,7 @@ getNAppearance comnt m expr = go m expr >>= (\(x, y, _) -> return (x, y))
       if new_n <= 0
         then return (new_e, \x -> App (new_builder x) arg, new_n)
         else go new_n arg <&> updBuilder (App f .)
-    go n f@(Var f_id) | getStrById f_id == comnt = return (f, id, n - 1)
+    go n f@(Var f_id) | nameMatchesId comnt f_id = return (f, id, n - 1)
     go n e = return (e, id, n)
 
     updBuilder updater (diff_expr, builder, n) = (diff_expr, updater builder, n)
@@ -397,7 +427,7 @@ analyzeEtaConv control_expr expr =
     return (control_expr, builder new_expr)
 
 -- | Analyze Def annotated conversions
-analyzeDefConv :: String -> Integer -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
+analyzeDefConv :: NameRef -> Integer -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
 analyzeDefConv comment n control_expr expr =
   do
     logMsg "Evaluate def-conversion"
@@ -422,10 +452,10 @@ analyzeDefConv comment n control_expr expr =
 
     checkComment :: CoreExpr -> CheckerM Id
     checkComment (Var func_id)
-      | getStrById func_id == comment = return func_id
+      | nameMatchesId comment func_id = return func_id
       | otherwise                     = throwError $
         "Applied function_id does not match comment:" ++
-        "\n Expected: " ++ comment ++
+        "\n Expected: " ++ show comment ++
         "\n Got     : " ++ prettyString func_id
     checkComment e = throwError $ "Applied expression not a function call!\nGot: " ++ prettyString e
 
@@ -441,17 +471,17 @@ getBodyByFuncId func_id =
       Nothing        -> throwError $ "Function definition not found for:\n" ++ prettyString func_id
 
 -- | Analyze Prop annotated conversions
-analyzePropConv :: String -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
+analyzePropConv :: NameRef -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
 analyzePropConv comment control_expr expr =
   do
     logMsg "Evaluate prop-conversion"
     (diff_expr, builder) <- getFirstDiff control_expr expr
     postl_defs           <- gets st_postldefs
-    let matchedPstls      = filter ((comment ==) . getStrById . pstl_id) postl_defs
+    let matchedPstls      = filter (nameMatchesId comment . pstl_id) postl_defs
     rule <- case matchedPstls of
       [pstl] -> return pstl
-      (_:_)  -> throwError $ "Unexpected postulate. Found more than one matched with comment `" ++ comment ++ "`"
-      []     -> throwError $ "Unexpected postulate. Not found match with comment `"             ++ comment ++ "`"
+      (_:_)  -> throwError $ "Unexpected postulate. Found more than one matched with comment `" ++ show comment ++ "`"
+      []     -> throwError $ "Unexpected postulate. Not found match with comment `"             ++ show comment ++ "`"
 
     case collectArgs diff_expr of
       (Var _, _) -> return ()
@@ -464,7 +494,7 @@ analyzePropConv comment control_expr expr =
 
 
 -- | Analyze Inst annotated conversions
-analyzeInstConv :: String -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
+analyzeInstConv :: NameRef -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
 analyzeInstConv comment control_expr expr =
   do
     logMsg "Evaluate inst-conversion"
@@ -518,10 +548,10 @@ analyzeInstConv comment control_expr expr =
 
     checkComment :: CoreExpr -> CheckerM Id
     checkComment (Var func_id)
-      | getStrById func_id == comment = return func_id
+      | nameMatchesId comment func_id = return func_id
       | otherwise  = throwError $
         "Applied function_id does not match comment:" ++
-        "\n Expected: " ++ comment ++
+        "\n Expected: " ++ show comment ++
         "\n Got     : " ++ prettyString func_id
     checkComment e = throwError $ "Applied expression not a function call!\nGot: " ++ prettyString e
 

@@ -4,14 +4,22 @@ Description : Annotation operators and base function defenition from Haskell rep
 
 This module contains operators for  annotating equation reasonings and basic functions coppied from Haskell report.
 -}
-module ProofBase (Tactic(..), Rewrite(..), (--.), (===), (.), ($), id, flip, const) where
+module ProofBase (Tactic, Rewrite, TacticN(..), RewriteN(..), (--.), (===), (.), ($), id, flip, const) where
 
+import Language.Haskell.TH (Name)
 import Prelude hiding ((.), ($), id, flip, const)
 
 -- | Tactic annotation for the conversion
-data Tactic = L Rewrite | R Rewrite  | QED | Postulate
--- | Rewrite rule applied to the expression
-data Rewrite = Def String | Prop String | Inst String | Beta | Eta | DefRec String Integer
+data TacticN n = L (RewriteN n) | R (RewriteN n) | QED | Postulate
+
+-- | Rewrite rule applied to the expression.
+-- @n@ is the name payload: 'Name' for user-facing DSL
+-- (so @Def \'id@ compiles only if @id@ is in scope),
+-- a decoded reference for checker internals
+data RewriteN n = Def n | Prop n | Inst n | Beta | Eta | DefRec n Integer
+
+type Tactic  = TacticN Name
+type Rewrite = RewriteN Name
 
 -- | Operator for adding Tactic annotation to the conversion
 (--.) :: a -> Tactic -> a

@@ -22,7 +22,7 @@ import GHC.Utils.Outputable
 import Data.List (intercalate, sort, sortOn)
 
 import AstInfo
-import ProofBase ( Rewrite(..), Tactic(..) )
+import ProofBase ( RewriteN(..), TacticN(..) )
 
 
 
@@ -62,26 +62,26 @@ instance Outputable PostlDef where
         $$ text "rule:" <+> ppr (pstl_rule p)
       )
 
-instance Outputable Rewrite where
+instance Outputable (RewriteN NameRef) where
   ppr rewrite =
     case rewrite of
       Def name ->
-        text "Def " <+> doubleQuotes (text name)
+        text "Def " <+> doubleQuotes (text (show name))
       Prop name ->
-        text "Prop" <+> doubleQuotes (text name)
+        text "Prop" <+> doubleQuotes (text (show name))
       Inst name ->
-        text "Inst" <+> doubleQuotes (text name)
+        text "Inst" <+> doubleQuotes (text (show name))
       Beta ->
         text "Beta"
       Eta ->
         text "Eta "
       DefRec name depth ->
         text "DefRec"
-          <+> doubleQuotes (text name)
+          <+> doubleQuotes (text (show name))
           <+> parens (text "depth =" <+> integer depth)
 
 
-instance Outputable Tactic where
+instance Outputable (TacticN NameRef) where
   ppr sideInfo =
     case sideInfo of
       L expr ->

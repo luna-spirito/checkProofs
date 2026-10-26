@@ -3,8 +3,9 @@ ANALUZING FILE: examples/ProofsFailure.hs
 
 ============================================
 ================== REPORT ==================
-Succsessfully proved: 0
-  <None>
+Succsessfully proved: 2
+  composeLeftNeutral
+  mjfr2
 
 Failures proved: 2
   fish2_skipStep
