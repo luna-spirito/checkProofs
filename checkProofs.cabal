@@ -61,6 +61,7 @@ library
     exposed-modules:
         PrettyString
         AstInfo
+        Kernel
         SortDecls
         ProofBase
         CheckProofs

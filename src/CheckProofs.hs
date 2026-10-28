@@ -4,6 +4,11 @@
 Module      : CheckProofs
 Description : Checking equational reasoning
 License     : MIT
+
+Untrusted tactic layer of the checker: decodes tactics from the
+desugared program, selects rewrite sites, proposes one-step proofs
+("Pf") to the trusted kernel ("Kernel") and checks that kernel
+theorems line up with the user's chain.
 -}
 module CheckProofs where
 
@@ -14,11 +19,9 @@ import GHC
       GhcMonad(..), guessTarget, setTargets, depanal, mgModSummaries, parseModule, typecheckModule, desugarModule, DesugaredModule (dm_core_module), LoadHowMuch (LoadAllTargets), load, setTargets)
 import GHC.Paths (libdir)
 import GHC.Core
-import GHC.Core.Map.Type (DeBruijn(..), deBruijnize, extendCMEs)
 import GHC.Plugins hiding (L, getModule)
 
 import System.FilePath ((</>))
-import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.State.Lazy ( runStateT, gets, modify )
 import Control.Monad.Except ( runExceptT, MonadError(..) )
 import Control.Applicative ((<|>))
@@ -28,23 +31,12 @@ import Data.Functor ((<&>))
 import Data.List (find)
 import Data.Bifunctor (bimap)
 
--- Simplifier
-import GHC.Unit.External (initExternalUnitCache, eucEPS, ExternalPackageState(..))
-import GHC.Driver.Config.Core.Opt.Simplify (initSimplifyExprOpts)
-import GHC.Core.FamInstEnv (extendFamInstEnvList, emptyFamInstEnv)
-import GHC.Core.Opt.Simplify (SimplifyExprOpts(..))
-import GHC.Core.Opt.Simplify.Env ( getInScope, mkSimplEnv, setInScopeSet, seRuleOpts, SimplEnv (seMode) )
-import GHC.Core.Opt.Simplify.Utils ( getUnfoldingInRuleMatch, activeRule )
-import GHC.Core.SimpleOpt ( defaultSimpleOpts, simpleOptExpr )
-
 import AstInfo
+import Kernel
 import PrettyString
 import ProofBase ( RewriteN(..), TacticN(..) )
 import SortDecls ( sorteDeclConvrs )
 
-
-logPath :: FilePath
-logPath = "logs" </> "app.txt"
 
 proofbasePath :: FilePath
 proofbasePath = "src" </> "ProofBase.hs"
@@ -65,14 +57,8 @@ checkProofsReport filePath = do
     liftIO $ writeFile logPath analyzing_file_str
     (mg_main, mg_base) <- getModulesGuts filePath
 
-    -- logMsg "\n=== Core mg_binds ===\n"
-    -- logMsg (showSDocUnsafe $ ppr $ mg_binds mg_main)
-
     -- create State
     let astState = getState session (mg_binds mg_main) (mg_binds mg_base)
-    -- logMsg "\n===== Collected AstState =====\n"
-    -- logMsg $ prettyString astState
-    -- logMsg "\n===== End AstState =====\n"
     report <- liftIO $ analyzeModuleSt astState
 
     logMsg "\n===== The End: App/Main ====="
@@ -148,9 +134,6 @@ createFail CheckerST{..} reason = (,) d_id $
       Just d  -> (d, getStrById d)
       Nothing -> error "Have failure but no st_declconvr_id"
 
-getStrById :: Id -> String
-getStrById v = occNameString (getOccName v)
-
 -- | Is the expression an application of a tactic data constructor?
 -- Polymorphic constructors are applied to a type first in Core (@QED \@\@n@).
 isTacticCon :: String -> CoreExpr -> Bool
@@ -190,7 +173,7 @@ toRewrite rw_expr =
       _               -> err
     _ -> err
   where
-    err = error $ "Unexpected expression structure for rewrite, expected `Beta`, `Eta`, `Def 'name`, `Prop 'name`, `Inst 'name` or `DefRec 'name n > 0`.\nGot: " ++ prettyString rw_expr
+    err = error $ "Unexpected expression structure for rewrite, expected `Beta`, `Eta`, `Def 'name'`, `Prop 'name'`, `Inst 'name'` or `DefRec 'name n > 0`.\nGot: " ++ prettyString rw_expr
 
 -- | Recover a quoted name from its desugared TH quote in Core:
 -- @mkNameG_v \"pkg\" \"module\" \"occname\"@
@@ -206,60 +189,12 @@ nameRefFromCore name_expr =
                   , nrPkg = Just (BS8.unpack pkg) }
     _ -> error $ "Unexpected expression structure for quoted name.\nGot: " ++ prettyString name_expr
 
-{-|
--- assume that any variable in convertion is OR
-* in (\x ->) this convertion
-* global func
-* parametr for this function
-
--- alphaEq called for whole expr works correctly
--- for subexpr need to remember Lam-binds (\x ->)
--}
-alphaEq :: (Eq (DeBruijn a)) => a -> a -> Bool
-alphaEq lhv rhv = deBruijnize lhv == deBruijnize rhv
-
--- Called in getFirstDiff
-alphaEqWithEnv :: (Eq (DeBruijn a)) => ([Id], [Id]) -> a -> a -> Bool
-alphaEqWithEnv (l_vars, r_vars) lhv rhv =
-    deBrujinWithEnv lhv l_vars == deBrujinWithEnv rhv r_vars
-  where
-    deBrujinWithEnv e vars =
-      case deBruijnize e of (D cm_env a) -> D (extendCMEs cm_env vars) a
-
 
 mapPassStM :: (Monad m) => (a -> s -> m (b, s)) -> [a] -> s -> m [(b, s)]
 mapPassStM _ [] _ = return []
 mapPassStM f (a:as) s = do
   r@(_, s1) <- f a s
   (r :) <$> mapPassStM f as s1
-
--- | Helper creating PostlDef
-mkRulePstl :: HscEnv -> Id -> [CoreBndr] -> CoreExpr -> CoreExpr -> Maybe PostlDef
-mkRulePstl hscEnv pstl_id pstl_binds pstl_lhs pstl_rhs =
-  case lhs_func of
-        Var fid -> Just $ mkRuleHelper (getName fid) fid
-        _       -> Nothing
-  where
-    (lhs_func, lhs_args) = collectArgs pstl_lhs
-    mkRuleHelper lhs_f_name f_id = PostlDef pstl_id f_infoId rule
-      where
-        rule = mkRule
-          (getModule hscEnv)
-          False
-          True
-          (mkFastString ("my-rule-" ++ getStrById pstl_id))
-          AlwaysActive
-          lhs_f_name
-          pstl_binds
-          lhs_args
-          pstl_rhs
-        f_infoId = modifyIdInfo (`setRuleInfo` RuleInfo [rule] emptyDVarSet) f_id
-        getModule = mainModIs . hsc_HUE
----- UTILS
-
-
-logMsg :: (MonadIO m) => String -> m ()
-logMsg log_msg = liftIO $ appendFile logPath (log_msg ++ "\n")
 
 
 incCnvrsCounter :: CheckerM ()
@@ -273,26 +208,6 @@ incCnvrsCounter =
 
 newDeclCnvrs :: Id -> CheckerM ()
 newDeclCnvrs decl_id = modify (\st -> st { st_cnvrs_count = 0, st_declconvr_id = Just decl_id })
-
-madePostulate :: Id -> CheckerM ()
-madePostulate fn_id =
-  do
-    (f_id, f_body)     <- getBodyByFuncId fn_id
-    let (pstl_binds, _) = collectBinders f_body
-    declConvrs <- gets st_declconvrs
-
-    (convrs_fst, convrs_lst) <- case lookup f_id declConvrs of
-      Just convrs@(cnvr:_) -> return (cnvr, last convrs)
-      _                    -> throwError $
-        "Unexpected state. Succesfully analized " ++ getStrById f_id ++ " but it doesn't have conversions."
-    hscEnv     <- gets st_hscenv
-    case mkRulePstl hscEnv f_id pstl_binds (cn_lhs convrs_fst) (cn_rhs convrs_lst) of
-      Nothing -> logMsg $ "Can't make postulate from `" ++ prettyString f_id ++
-        "`.\n  Pstl_lhs must be of form (f e1 .. en) where f is not forall'd.\n"
-      Just new_postl -> do
-        logMsg $ "Made new postulate from: " ++ prettyString f_id ++ "\n"
-        modify (\st -> st { st_postldefs = new_postl : st_postldefs st})
-
 
 
 ------ Analyze
@@ -324,20 +239,6 @@ analyzeModuleSt checkerST =
 
 
 ---- ANALYZE SINGLE CONVERSION
--- | Final comparison
-cmpCnvrs :: CoreExpr -> CoreExpr -> CheckerM ()
-cmpCnvrs e_cntr e | alphaEq e_cntr e = logMsg "Compare result: True\n"
-cmpCnvrs e_cntr e =
-  do
-    logMsg $
-      "EXPR: " ++ prettyString e ++ "\n" ++
-      "==?==\n" ++
-      "CNTR: " ++ prettyString e_cntr ++ "\n" ++
-      "Compare result: False\n"
-    throwError $ "Error. Not equal." ++
-      "\n\nExpected: " ++ prettyString e_cntr ++
-      "\n\n    Got: " ++ prettyString e ++ "\n"
-
 -- | Main function entry for analyzing single conversion
 analyzeConvrs :: Conversion -> CheckerM ()
 analyzeConvrs Conversion{..} =
@@ -362,94 +263,84 @@ analyzeConvrs Conversion{..} =
         (ce, e) <- analyzeExpr control_expr expr
         cmpCnvrs ce e
 
+
+---- TACTICS
+-- Each tactic selects where the rewrite applies (getFirstDiff /
+-- getNAppearance), checks the target against the tactic's name, and
+-- proposes a kernel step; the kernel validates the rewrite itself.
+
 ---- just believe that this is enought
--- | Function search of first diff between expression
-getFirstDiff :: CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr -> CoreExpr)
+-- | Function search of first diff between expression.
+-- Returns the differing subexpression and the context it sits in.
+getFirstDiff :: CoreExpr -> CoreExpr -> CheckerM (CoreExpr, Ctx)
 getFirstDiff contrl_expr expr =
   do
-    (d_expr, bldr, _) <- go ([], []) contrl_expr expr
+    (d_expr, ctx, _) <- go ([], []) contrl_expr expr
     logMsg $ "getFirstDiff result:" ++
       "\ncntr_expr:\n" ++ prettyString contrl_expr ++
       "\nexpr:\n" ++ prettyString d_expr ++ "\n"
-    return (d_expr, bldr)
+    return (d_expr, ctx)
 
   where
     go cm_envs (Lam cntr_b cntr_body) (Lam b body) = do
       let new_cm_envs = bimap (cntr_b :) (b :) cm_envs
       res <- go new_cm_envs cntr_body body
-      return $ updBuilder (Lam b .) res
+      return $ updBuilder (CLam b) res
     go cm_envs ce@(App _ (Type _)) e@(App _ (Type _)) = checkEq cm_envs ce e True
     go cm_envs (App cntr_f cntr_arg) (App f arg) =
       (go cm_envs cntr_f f <&>
         \case
-          (diff, bldr, True)  -> (App diff arg, bldr, True)
-          (diff, bldr, False) -> (diff, \x -> App (bldr x) arg, False))
-        <|> (go cm_envs cntr_arg arg <&> updBuilder (App f .))
+          (diff, ctx, True)  -> (App diff arg, ctx, True)
+          (diff, ctx, False) -> (diff, CAppF ctx arg, False))
+        <|> (go cm_envs cntr_arg arg <&> updBuilder (CAppA f))
     go cm_envs ce e@(App _ _) = checkEq cm_envs ce e True
     go cm_envs ce e = checkEq cm_envs ce e False
 
-    updBuilder updater (diff_expr, builder, _) = (diff_expr, updater builder, False)
+    updBuilder updater (diff_expr, ctx, _) = (diff_expr, updater ctx, False)
     checkEq cm_envs ce e is_collect
       | alphaEqWithEnv cm_envs ce e = throwError $ "No difference." ++
         "\n  cntr_expr: " ++ prettyString ce ++
         "\n       expr: " ++ prettyString e ++ "\n"
       | otherwise    = do
         logMsg $ "Get diff:\n  cntr_expr: " ++ prettyString ce ++ "\n       expr: " ++ prettyString e ++ "\n"
-        return (e, id, is_collect)
+        return (e, Hole, is_collect)
 
-getNAppearance :: NameRef -> Integer -> CoreExpr -> CheckerM (CoreExpr, CoreExpr -> CoreExpr)
+getNAppearance :: NameRef -> Integer -> CoreExpr -> CheckerM (CoreExpr, Ctx)
 getNAppearance comnt m expr = go m expr >>= (\(x, y, _) -> return (x, y))
   where
-    go n (Lam b body) = go n body <&> updBuilder (Lam b .)
+    go n (Lam b body) = go n body <&> updBuilder (CLam b)
     go n (App f arg) = do
-      (new_e, new_builder, new_n) <- go n f
+      (new_e, new_ctx, new_n) <- go n f
       if new_n <= 0
-        then return (new_e, \x -> App (new_builder x) arg, new_n)
-        else go new_n arg <&> updBuilder (App f .)
-    go n f@(Var f_id) | nameMatchesId comnt f_id = return (f, id, n - 1)
-    go n e = return (e, id, n)
+        then return (new_e, CAppF new_ctx arg, new_n)
+        else go n arg <&> updBuilder (CAppA f)
+    go n f@(Var f_id) | nameMatchesId comnt f_id = return (f, Hole, n - 1)
+    go n e = return (e, Hole, n)
 
-    updBuilder updater (diff_expr, builder, n) = (diff_expr, updater builder, n)
+    updBuilder updater (diff_expr, ctx, n) = (diff_expr, updater ctx, n)
 
 -- | Analyze beta reduction conversions
 analyzeBetaConv :: CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
-analyzeBetaConv control_expr expr = return (control_expr, expr) -- TODO: check alphaEq
-
--- | Analyze eta reduction conversions
-analyzeEtaConv :: CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
-analyzeEtaConv control_expr expr =
-  do
-    logMsg "Evaluate eta-reduction"
-    (diff_expr, builder) <- getFirstDiff control_expr expr
-    new_expr <- case diff_expr of
-      (Lam v1 (App f (Var v2))) | v1 == v2 -> return f  -- TODO: check and fix
-      _ -> throwError $ "Error in analyzeEtaConv:\n" ++ prettyString diff_expr
-    return (control_expr, builder new_expr)
+-- TODO (next phase): verify with the trusted normalizer. Today both
+-- sides are returned unchanged and only alphaEq-checked, which works
+-- because the desugarer already beta-reduces source redexes.
+analyzeBetaConv control_expr expr = return (control_expr, expr)
 
 -- | Analyze Def annotated conversions
 analyzeDefConv :: NameRef -> Integer -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
 analyzeDefConv comment n control_expr expr =
   do
     logMsg "Evaluate def-conversion"
-    (diff_expr, builder) <-
+    (diff_expr, ctx) <-
       if n <= 0
         then getFirstDiff control_expr expr
         else getNAppearance comment n expr
-    subst_expr      <- substitute diff_expr
-    let restr_expr   = builder subst_expr
-    simpl_expr      <- simplifyOptFunc restr_expr
-    return (control_expr, simpl_expr)
+    let (func, args) = collectArgs diff_expr
+    func_id         <- checkComment func
+    thm             <- kernelCheck (DefAt ctx func_id args)
+    return (control_expr, thmRhs thm)
 
   where
-    substitute e =
-      do
-        let (func, args)      = collectArgs e
-        fn_id                <- checkComment func
-        (func_id, func_body) <- getBodyByFuncId fn_id
-        logMsg $ "Substitute def for function: " ++ prettyString func_id ++ "\n"
-        let subst_func        = easySubstFunc (Var func_id) func_id func_body
-        return $ mkCoreApps subst_func args
-
     checkComment :: CoreExpr -> CheckerM Id
     checkComment (Var func_id)
       | nameMatchesId comment func_id = return func_id
@@ -459,26 +350,15 @@ analyzeDefConv comment n control_expr expr =
         "\n Got     : " ++ prettyString func_id
     checkComment e = throwError $ "Applied expression not a function call!\nGot: " ++ prettyString e
 
-getBodyByFuncId :: Id -> CheckerM (Id, CoreExpr)
-getBodyByFuncId func_id =
-  do
-    let (fl_id, stDefs) = case nameModule_maybe (idName func_id) of
-          Just modl | showSDocUnsafe (ppr modl) == "ProofBase" -> (localiseId func_id, st_base_defs)
-          _                                                    -> (func_id, st_funcdefs)
-    func_defs <- gets stDefs
-    case lookup func_id func_defs of
-      Just func_body -> return (fl_id, func_body)
-      Nothing        -> throwError $ "Function definition not found for:\n" ++ prettyString func_id
-
 -- | Analyze Prop annotated conversions
 analyzePropConv :: NameRef -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
 analyzePropConv comment control_expr expr =
   do
     logMsg "Evaluate prop-conversion"
-    (diff_expr, builder) <- getFirstDiff control_expr expr
-    postl_defs           <- gets st_postldefs
-    let matchedPstls      = filter (nameMatchesId comment . pstl_id) postl_defs
-    rule <- case matchedPstls of
+    (diff_expr, ctx) <- getFirstDiff control_expr expr
+    postl_defs       <- gets st_postldefs
+    let matchedPstls  = filter (nameMatchesId comment . pstl_id) postl_defs
+    pstl <- case matchedPstls of
       [pstl] -> return pstl
       (_:_)  -> throwError $ "Unexpected postulate. Found more than one matched with comment `" ++ show comment ++ "`"
       []     -> throwError $ "Unexpected postulate. Not found match with comment `"             ++ show comment ++ "`"
@@ -486,11 +366,8 @@ analyzePropConv comment control_expr expr =
     case collectArgs diff_expr of
       (Var _, _) -> return ()
       _          -> throwError $ "Not implemented: " ++ "postl dif not var."
-    lookup_expr        <- substRule [rule] diff_expr
-    let lookup_restored = builder lookup_expr
-    -- TODO
-    simpl_expr         <- simplifyOptFunc lookup_restored
-    return (control_expr, simpl_expr)
+    thm <- kernelCheck (RuleAt ctx diff_expr pstl)
+    return (control_expr, thmRhs thm)
 
 
 -- | Analyze Inst annotated conversions
@@ -498,54 +375,13 @@ analyzeInstConv :: NameRef -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreEx
 analyzeInstConv comment control_expr expr =
   do
     logMsg "Evaluate inst-conversion"
-    (diff_expr, builder) <- getFirstDiff control_expr expr
-    subst_inst      <- substituteInst diff_expr
-    subst_simp      <- simplifyOptFunc subst_inst
-    subst_expr      <- ordinar_subst subst_simp
-    let restr_expr   = builder subst_expr
-    simpl_expr      <- simplifyOptFunc restr_expr
-    return (control_expr, simpl_expr)
+    (diff_expr, ctx) <- getFirstDiff control_expr expr
+    let (func, _) = collectArgs diff_expr
+    checkComment func
+    thm <- kernelCheck (InstAt ctx diff_expr)
+    return (control_expr, thmRhs thm)
 
   where
-    substituteInst expr =
-      do
-        let (func, args) = collectArgs expr
-        func_id         <- checkComment func
-        let func_body    = unfoldingTemplate $ idUnfolding func_id
-
-        {- TODO check why doesn't work
-          logMsg $ "SUBS_INST" ++
-            "\nsubst_func:\n" ++ prettyString subst_func ++
-            "\n      func:\n" ++ prettyString func ++
-            "\n   func_id:\n" ++ prettyString func_id ++
-            "\n func_body:\n" ++ prettyString func_body
-        -}
-        let subst_selector = mkCoreApps func_body (take 2 args)
-        selector_simpl    <- simplifyOptFunc subst_selector
-        logMsg $ "Substitute selector for instance_method: " ++ prettyString func_id ++ "\n"
-        -- logMsg $ "Selector implementation\n" ++ prettyString selector_simpl ++ "\n"
-
-
-        instce_id <- case collectArgs (args !! 1) of
-          (Var instce_id, _) -> return instce_id
-          _                  -> throwError $ "Not implemented: " ++ "instance_is not var."
-        (inst_id, inst_body)  <- getBodyByFuncId instce_id
-        let subst_inst         = easySubstFunc selector_simpl inst_id inst_body
-        selector_inst         <- simplifyOptFunc subst_inst
-        logMsg $ "Substitute instance for instance_method: " ++ prettyString instce_id ++ "\n"
-        -- logMsg $ "Selector instanced\n" ++ prettyString selector_inst
-        return $ mkCoreApps selector_inst (drop 2 args)
-
-    ordinar_subst expr =
-      do
-        (func@(Var fn_id), args) <- case collectArgs expr of
-          f@(Var _, _) -> return f
-          _            -> throwError $ "Not implemented: " ++ "function not var."
-        (func_id, func_body)        <- getBodyByFuncId fn_id
-        let subst_func = easySubstFunc func func_id func_body
-        logMsg $ "Substitute instance method for inst: " ++ prettyString func_id ++ "\n"
-        return $ mkCoreApps subst_func args
-
     checkComment :: CoreExpr -> CheckerM Id
     checkComment (Var func_id)
       | nameMatchesId comment func_id = return func_id
@@ -555,114 +391,11 @@ analyzeInstConv comment control_expr expr =
         "\n Got     : " ++ prettyString func_id
     checkComment e = throwError $ "Applied expression not a function call!\nGot: " ++ prettyString e
 
-
-
-
----- SIMPLIFIERS
-inlineLetsIgnoreCast :: CoreExpr -> CoreExpr
-inlineLetsIgnoreCast expr =
-  case expr of
-    Let (NonRec b rhs) body ->
-      inlineLetsIgnoreCast (easySubstFunc body b rhs)
-    App f x ->
-      App (inlineLetsIgnoreCast f) (inlineLetsIgnoreCast x)
-    Lam b e ->
-      Lam b (inlineLetsIgnoreCast e)
-    Cast e _ -> inlineLetsIgnoreCast e
-    _ -> expr
-
--- | substExpr wrapper
-easySubstFunc :: CoreExpr -> Id -> CoreExpr -> CoreExpr
-easySubstFunc expr fn_id fn_body = substExpr subst expr
-  where
-    delFunFV = mkInScopeSet $ delVarSet (exprFreeVars expr) fn_id
-    subst = extendSubst (mkEmptySubst delFunFV) fn_id fn_body
-
--- | run 3 times in cyrcle
---
--- * simpleOptExpr
--- * inline created @let@ expressions
--- * check if any beta-reductions
--- * if yes repeat
-simplifyOptFunc :: CoreExpr -> CheckerM CoreExpr
-simplifyOptFunc expr = go 0 expr
-  where
-    go :: Int -> CoreExpr -> CheckerM CoreExpr
-    go n _ | n >= 3 = throwError $
-      "Unexpected expression. Expression needs to much beta-reductions. " ++
-      "Default threshold = 3. Expr:\n" ++ prettyString expr ++ "\n"
-    go n e = do
-      logMsg $ "Try simplifyOptFunc n=" ++ show n ++ "\n"
-      let no_lets_expr = inlineLetsIgnoreCast (simpleOptExpr defaultSimpleOpts e)
-      case find isBetaRedex (universe no_lets_expr) of
-        Just _  -> go (n + 1) no_lets_expr
-        Nothing -> return no_lets_expr
-
-    isBetaRedex (App (Lam _ _) _) = True
-    isBetaRedex _                 = False
-
-
--- | Substitute rules. lookupRule wrapper
-substRule :: [PostlDef] -> CoreExpr -> CheckerM CoreExpr
-substRule pstls expr =
+-- | Analyze eta reduction conversions
+analyzeEtaConv :: CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
+analyzeEtaConv control_expr expr =
   do
-    hscEnv <- gets st_hscenv
-    let opts   = initSimplifyExprOpts (hsc_dflags hscEnv) (hsc_IC hscEnv)
-
-    euc <- liftIO initExternalUnitCache
-    eps <- liftIO (eucEPS euc)
-
-    let fam_envs =  ( eps_fam_inst_env eps
-                    , extendFamInstEnvList emptyFamInstEnv $ se_fam_inst opts
-                    )
-        rules = map pstl_rule pstls
-        simpl_env = mkSimplEnv (se_mode opts) fam_envs
-        ru_rhs_fv = map ruleRhsFreeVars rules
-        fv_set    = foldl unionUniqSets (exprFreeVars expr) ru_rhs_fv
-        -- NOTE order is important. We want to preserve modified pstl_fid
-        fv_idInfo_set = fv_set `addListToUniqSet` map pstl_fid pstls
-        my_in_scope   = getInScope simpl_env `extendInScopeSetSet` fv_idInfo_set
-        my_env        = setInScopeSet simpl_env my_in_scope
-
-    let
-      ru_opts         = seRuleOpts my_env           :: RuleOpts
-      in_scope_env = getUnfoldingInRuleMatch my_env :: InScopeEnv
-      act_fun      = activeRule (seMode my_env)     :: Activation -> Bool
-      rules_id_str = show $ map (prettyString . pstl_id) pstls
-      (Var f_target, args_targetgs) = collectArgs expr
-
-    case lookupRule ru_opts in_scope_env act_fun f_target args_targetgs rules of
-      Nothing -> do
-        logMsg     $ "Rule `" ++ rules_id_str ++ "`not fired." ++ "\n"
-        throwError $ "Rule `" ++ rules_id_str ++ "`not fired." ++
-          "\nRule:\n" ++ prettyString pstls ++
-          "\nExpr:\n" ++ prettyString expr ++ "\n"
-      Just (applied_rule, new_expr) -> do
-          logMsg $ "Rule fired:" ++ rules_id_str ++ "\n"
-          return $ reapplyExtraArgs applied_rule new_expr
-
-  where
-    reapplyExtraArgs applied_rule new_expr = mkApps new_expr (leftoverArgs applied_rule)
-    leftoverArgs ap_ru = drop (ruleArity ap_ru) $ snd (collectArgs expr)
-
-
-
--- {- TODO:
---     * collectModule no dif just yet
---     * analyze each conversion separatly
---         * Chcek comment.
---         * if Func
---             * take correct hand-side
---             * find first applied function:
---                 * it could be inside lam
---                 * compare that before that alphaEq
---             * Check that function coresponds with comment
---             * Find defenition for func
---             * subst and restore function
---             * simplify ? (restored function) (whole expr)
---             * letinlined
---             * compare alphaEq
---         * if Beta
---             * compare alphaEq
---     * prettyStringBinds (cm_binds coreMod)
--- -}
+    logMsg "Evaluate eta-reduction"
+    (diff_expr, ctx) <- getFirstDiff control_expr expr
+    thm <- kernelCheck (EtaAt ctx diff_expr)
+    return (control_expr, thmRhs thm)
