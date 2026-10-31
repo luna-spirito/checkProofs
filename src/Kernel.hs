@@ -5,10 +5,18 @@ Module      : Kernel
 Description : Trusted core of the equational reasoning checker
 License     : MIT
 
-Everything in this module is part of the trusted computing base. It provides:
+A minimal, isolated kernel: it depends only on GHC and general monad
+libraries, never on the tactic layer. It provides:
 
-* proof contexts ('Ctx'), one-step proofs ('Pf') and checked theorems
-  ('Thm'); 'kernelCheck' is the only way to obtain a 'Thm'
+* its own state ('KernelST': function tables, the postulate registry,
+  the GHC session) and monad ('KernelM')
+* 'Theorem': a proved equation. The type is abstract outside this
+  module, and the only ways to obtain a theorem are the kernel API —
+  'kernelStep' (one validated rewrite step), 'kernelBeta' (conversion
+  by the trusted normalizer), 'postThm' (a postulated axiom) and the
+  compositors 'transThm' and 'symThm'. A bug in the untrusted tactic
+  layer ("CheckProofs") can only make a proof fail, never produce a
+  false theorem.
 * trusted rule services built on GHC's own rewriting machinery:
   definitional unfolding via @substExpr@, postulate rules via
   @lookupRule@, normalization via @simpleOptExpr@
@@ -16,19 +24,48 @@ Everything in this module is part of the trusted computing base. It provides:
   becomes a rewrite rule for later @Prop@ steps
 
 Site selection (where to rewrite) lives in "CheckProofs" and is
-untrusted: a bug there can only make a proof fail, never prove a
-false equation.
+untrusted: 'kernelStep' verifies that the proposed site decomposes the
+rewritten line. Likewise 'PostlDef' values are abstract outside the
+kernel, so only rules the kernel itself registered can fire.
 -}
-module Kernel where
+module Kernel
+  ( -- * Kernel state and monad
+    KernelST(..)
+  , KernelM
+  , logMsg
+    -- * Judgments
+  , Theorem
+  , thmLeft
+  , thmRight
+    -- * Proof terms (opaque)
+  , Prf
+    -- * Proposed steps
+  , Pf(..)
+    -- * Kernel API: the only theorem constructors
+  , kernelStep
+  , kernelBeta
+  , postThm
+  , transThm
+  , symThm
+    -- * Site selection support (verified by 'kernelStep')
+  , Ctx(..)
+  , alphaEq
+  , alphaEqWithEnv
+    -- * Trusted services and registry
+  , madePostulate
+  , inlineLetsIgnoreCast
+  , getStrById
+  , PostlDef
+  , pstl_id
+  , FuncDef
+  ) where
 
 import GHC.Core
 import GHC.Core.Map.Type (DeBruijn(..), deBruijnize, extendCMEs)
 import GHC.Plugins hiding (getModule)
 
-import System.FilePath ((</>))
-import Control.Monad.IO.Class (MonadIO)
-import Control.Monad.State.Lazy ( gets, modify )
-import Control.Monad.Except ( MonadError(..) )
+import Control.Monad.State.Lazy ( StateT, gets, modify )
+import Control.Monad.Except ( ExceptT, MonadError(..) )
 import Data.Generics.Uniplate.Data (universe)
 import Data.List (find)
 
@@ -41,16 +78,56 @@ import GHC.Core.Opt.Simplify.Env ( getInScope, mkSimplEnv, setInScopeSet, seRule
 import GHC.Core.Opt.Simplify.Utils ( getUnfoldingInRuleMatch, activeRule )
 import GHC.Core.SimpleOpt ( defaultSimpleOpts, simpleOptExpr )
 
-import AstInfo
-import PrettyString
 
+---- KERNEL STATE
+-- | A function definition represented by its identifier and Core body.
+type FuncDef = (Id, CoreExpr)
 
----- LOGGING
-logPath :: FilePath
-logPath = "logs" </> "app.txt"
+-- | A postulate ready to fire as a rewrite rule. Abstract outside the
+-- kernel: only 'madePostulate' creates these, so a forged rule cannot
+-- reach 'kernelStep'.
+data PostlDef = PostlDef {
+  -- | Identifier of the postulate.
+  pstl_id     :: Id,
 
-logMsg :: (MonadIO m) => String -> m ()
-logMsg log_msg = liftIO $ appendFile logPath (log_msg ++ "\n")
+  -- | Identifier of the head function appearing on the left-hand
+  -- side of the rule.
+  pstl_fid    :: Id,
+
+  -- | The created Core rewrite rule.
+  pstl_rule   :: CoreRule
+}
+
+instance Outputable PostlDef where
+  ppr p =
+    text "PostlDef"
+      $$ nest 2 (
+           text "id:"   <+> ppr (pstl_id p)
+        $$ text "fid:"  <+> ppr (pstl_fid p)
+        $$ text "rule:" <+> ppr (pstl_rule p)
+      )
+
+-- | The state the kernel runs in: function tables, the postulate
+-- registry, the GHC session, and the kernel's log lines (most recent
+-- first; the caller splices them out).
+data KernelST = KernelST {
+  st_funcdefs  :: [FuncDef],
+  st_base_defs :: [FuncDef],
+  st_postldefs :: [PostlDef],
+  st_hscenv    :: HscEnv,
+  ks_log       :: [String]
+}
+
+-- | Kernel monad: errors, kernel state, IO for the GHC engines.
+type KernelM = ExceptT String (StateT KernelST IO)
+
+-- | Emit a log line into the kernel state.
+logMsg :: String -> KernelM ()
+logMsg msg = modify (\st -> st { ks_log = msg : ks_log st })
+
+-- | Rendering for kernel error messages; one line over the GHC API.
+prettyString :: (Outputable a) => a -> String
+prettyString = showSDocUnsafe . ppr
 
 
 ---- EXPRESSION EQUALITY (trusted)
@@ -89,10 +166,10 @@ plugCtx (CLam b ctx)    e = Lam b (plugCtx ctx e)
 
 
 ---- PROOFS AND THEOREMS
--- | Justification for one equational step, proposed by a tactic
--- ("CheckProofs") and validated by 'kernelCheck'. Each constructor
--- proves an equation between full expressions: the context applied to
--- both sides of the local rewrite.
+-- | Justification for one local rewrite, proposed by a tactic
+-- ("CheckProofs") and validated by 'kernelStep'. The context says
+-- where the rewrite applies; the kernel checks that it decomposes the
+-- rewritten line.
 data Pf
   = DefAt Ctx Id [CoreExpr]
     -- ^ @plugCtx ctx (f args)@ equals the unfolding of @f@ at @args@
@@ -103,46 +180,71 @@ data Pf
   | EtaAt Ctx CoreExpr
     -- ^ @plugCtx ctx site@ equals the eta-contraction of @site@
 
--- | An equation checked by the kernel. Constructible only via
--- 'kernelCheck'.
-data Thm = Thm
-  { thmLhs :: CoreExpr
-  , thmRhs :: CoreExpr
+-- | Kernel proof term: how a theorem was derived.
+data Prf
+  = StepPrf Pf        -- ^ one kernel-validated rewrite step
+  | BetaPrf           -- ^ the trusted normalizer proved the conversion
+  | AxiomPrf          -- ^ postulated equation
+  | TransPrf Prf Prf  -- ^ @a ≡ b@ and @b ≡ c@ prove @a ≡ c@
+  | SymPrf Prf        -- ^ @a ≡ b@ proves @b ≡ a@
+
+-- | A proved equation. Abstract outside this module: every value is
+-- produced by the kernel API.
+data Theorem = Theorem
+  { thmLeft  :: CoreExpr
+  , thmPrf   :: Prf
+  , thmRight :: CoreExpr
   }
 
--- | Check a proposed step with the trusted rule services.
-kernelCheck :: Pf -> CheckerM Thm
-kernelCheck pf = case pf of
-  DefAt ctx f_id args ->
-    do
-      (fl_id, func_body) <- getBodyByFuncId f_id
-      logMsg $ "Substitute def for function: " ++ prettyString fl_id ++ "\n"
-      let subst_func = easySubstFunc (Var fl_id) fl_id func_body
-      simpl_expr <- simplifyOptFunc (plugCtx ctx (mkCoreApps subst_func args))
-      return $ Thm (plugCtx ctx (mkCoreApps (Var f_id) args)) simpl_expr
-
-  RuleAt ctx site pstl ->
-    do
-      checkRegistered pstl
-      lookup_expr <- substRule [pstl] site
-      simpl_expr <- simplifyOptFunc (plugCtx ctx lookup_expr)
-      return $ Thm (plugCtx ctx site) simpl_expr
-
-  InstAt ctx site ->
-    do
-      subst_inst <- substituteInst site
-      subst_simp <- simplifyOptFunc subst_inst
-      subst_expr <- ordinar_subst subst_simp
-      simpl_expr <- simplifyOptFunc (plugCtx ctx subst_expr)
-      return $ Thm (plugCtx ctx site) simpl_expr
-
-  EtaAt ctx diff_expr ->
-    case diff_expr of
-      Lam v1 (App f (Var v2)) | v1 == v2 ->  -- TODO: check and fix
-        return $ Thm (plugCtx ctx diff_expr) (plugCtx ctx f)
-      _ -> throwError $ "Error in analyzeEtaConv:\n" ++ prettyString diff_expr
+-- | Validate one chain transition: the step @pf@ rewrites a site of
+-- @src@ and must reach something alpha-equal to @target@. The kernel
+-- itself verifies that the site decomposes @src@, so a buggy tactic
+-- cannot rewrite a term the proof never mentions.
+kernelStep :: CoreExpr -> Pf -> CoreExpr -> KernelM Theorem
+kernelStep src proposed target =
+  do
+    (lhs, rhs) <- checkStep proposed
+    if not (alphaEq lhs src)
+      then throwError $
+        "Internal error. Kernel derivation does not start at the chain line." ++
+        "\n line: " ++ prettyString src ++
+        "\n  lhs: " ++ prettyString lhs ++ "\n"
+      else do
+        cmpCnvrs target rhs
+        return Theorem { thmLeft = src, thmPrf = StepPrf proposed, thmRight = target }
 
   where
+    checkStep step = case step of
+      DefAt ctx f_id args ->
+        do
+          (fl_id, func_body) <- getBodyByFuncId f_id
+          logMsg $ "Substitute def for function: " ++ prettyString fl_id ++ "\n"
+          let subst_func = easySubstFunc (Var fl_id) fl_id func_body
+          simpl_expr <- simplifyOptFunc (plugCtx ctx (mkCoreApps subst_func args))
+          return (plugCtx ctx (mkCoreApps (Var f_id) args), simpl_expr)
+
+      RuleAt ctx site pstl ->
+        do
+          checkRegistered pstl
+          lookup_expr <- substRule [pstl] site
+          simpl_expr <- simplifyOptFunc (plugCtx ctx lookup_expr)
+          return (plugCtx ctx site, simpl_expr)
+
+      InstAt ctx site ->
+        do
+          subst_inst <- substituteInst site
+          subst_simp <- simplifyOptFunc subst_inst
+          subst_expr <- ordinar_subst subst_simp
+          simpl_expr <- simplifyOptFunc (plugCtx ctx subst_expr)
+          return (plugCtx ctx site, simpl_expr)
+
+      EtaAt ctx diff_expr ->
+        case diff_expr of
+          Lam v1 (App f (Var v2))
+            | v1 == v2, not (v1 `elemVarSet` exprFreeVars f) ->
+                return (plugCtx ctx diff_expr, plugCtx ctx f)
+          _ -> throwError $ "Error in analyzeEtaConv:\n" ++ prettyString diff_expr
+
     -- Resolution of a class-method call to the instance implementation
     substituteInst expr =
       do
@@ -184,8 +286,41 @@ kernelCheck pf = case pf of
         logMsg $ "Substitute instance method for inst: " ++ prettyString func_id ++ "\n"
         return $ mkCoreApps subst_func args
 
+-- | Prove two whole lines convertible by the trusted normalizer.
+kernelBeta :: CoreExpr -> CoreExpr -> KernelM Theorem
+kernelBeta ctl e =
+  do
+    n_ctl <- simplifyOptFunc ctl
+    n_e   <- simplifyOptFunc e
+    cmpCnvrs n_ctl n_e
+    return Theorem { thmLeft = ctl, thmPrf = BetaPrf, thmRight = e }
+
+-- | A postulated equation: assumed, not derived.
+postThm :: CoreExpr -> CoreExpr -> Theorem
+postThm l r = Theorem { thmLeft = l, thmPrf = AxiomPrf, thmRight = r }
+
+-- | Transitivity: @a ≡ b@ and @b ≡ c@ prove @a ≡ c@; the middle
+-- terms must agree.
+transThm :: Theorem -> Theorem -> KernelM Theorem
+transThm tl tr
+  | alphaEq (thmRight tl) (thmLeft tr) =
+      return Theorem
+        { thmLeft  = thmLeft tl
+        , thmPrf   = TransPrf (thmPrf tl) (thmPrf tr)
+        , thmRight = thmRight tr
+        }
+  | otherwise = throwError $
+      "Internal error. Transitivity on non-matching middle terms." ++
+      "\n  " ++ prettyString (thmRight tl) ++
+      "\n  " ++ prettyString (thmLeft tr) ++ "\n"
+
+-- | Symmetry of equality.
+symThm :: Theorem -> Theorem
+symThm thm =
+  Theorem { thmLeft = thmRight thm, thmPrf = SymPrf (thmPrf thm), thmRight = thmLeft thm }
+
 -- | Guard for 'RuleAt': the fired rule must come from the registry.
-checkRegistered :: PostlDef -> CheckerM ()
+checkRegistered :: PostlDef -> KernelM ()
 checkRegistered pstl = do
   postl_defs <- gets st_postldefs
   case any (\p -> pstl_id p == pstl_id pstl) postl_defs of
@@ -198,7 +333,7 @@ checkRegistered pstl = do
 getStrById :: Id -> String
 getStrById v = occNameString (getOccName v)
 
-getBodyByFuncId :: Id -> CheckerM (Id, CoreExpr)
+getBodyByFuncId :: Id -> KernelM (Id, CoreExpr)
 getBodyByFuncId func_id =
   do
     let (fl_id, stDefs) = case nameModule_maybe (idName func_id) of
@@ -234,10 +369,10 @@ inlineLetsIgnoreCast expr =
 -- * inline created @let@ expressions
 -- * check if any beta-reductions
 -- * if yes repeat
-simplifyOptFunc :: CoreExpr -> CheckerM CoreExpr
+simplifyOptFunc :: CoreExpr -> KernelM CoreExpr
 simplifyOptFunc expr = go 0 expr
   where
-    go :: Int -> CoreExpr -> CheckerM CoreExpr
+    go :: Int -> CoreExpr -> KernelM CoreExpr
     go n _ | n >= 3 = throwError $
       "Unexpected expression. Expression needs to much beta-reductions. " ++
       "Default threshold = 3. Expr:\n" ++ prettyString expr ++ "\n"
@@ -253,7 +388,7 @@ simplifyOptFunc expr = go 0 expr
 
 
 -- | Substitute rules. lookupRule wrapper
-substRule :: [PostlDef] -> CoreExpr -> CheckerM CoreExpr
+substRule :: [PostlDef] -> CoreExpr -> KernelM CoreExpr
 substRule pstls expr =
   do
     hscEnv <- gets st_hscenv
@@ -320,19 +455,13 @@ mkRulePstl hscEnv pstl_id pstl_binds pstl_lhs pstl_rhs =
         f_infoId = modifyIdInfo (`setRuleInfo` RuleInfo [rule] emptyDVarSet) f_id
         getModule = mainModIs . hsc_HUE
 
-madePostulate :: Id -> CheckerM ()
-madePostulate fn_id =
+madePostulate :: Id -> Theorem -> KernelM ()
+madePostulate fn_id thm =
   do
     (f_id, f_body)     <- getBodyByFuncId fn_id
     let (pstl_binds, _) = collectBinders f_body
-    declConvrs <- gets st_declconvrs
-
-    (convrs_fst, convrs_lst) <- case lookup f_id declConvrs of
-      Just convrs@(cnvr:_) -> return (cnvr, last convrs)
-      _                    -> throwError $
-        "Unexpected state. Succesfully analized " ++ getStrById f_id ++ " but it doesn't have conversions."
-    hscEnv     <- gets st_hscenv
-    case mkRulePstl hscEnv f_id pstl_binds (cn_lhs convrs_fst) (cn_rhs convrs_lst) of
+    hscEnv             <- gets st_hscenv
+    case mkRulePstl hscEnv f_id pstl_binds (thmLeft thm) (thmRight thm) of
       Nothing -> logMsg $ "Can't make postulate from `" ++ prettyString f_id ++
         "`.\n  Pstl_lhs must be of form (f e1 .. en) where f is not forall'd.\n"
       Just new_postl -> do
@@ -342,7 +471,7 @@ madePostulate fn_id =
 
 ---- JUDGMENT
 -- | Final comparison
-cmpCnvrs :: CoreExpr -> CoreExpr -> CheckerM ()
+cmpCnvrs :: CoreExpr -> CoreExpr -> KernelM ()
 cmpCnvrs e_cntr e | alphaEq e_cntr e = logMsg "Compare result: True\n"
 cmpCnvrs e_cntr e =
   do

@@ -7,10 +7,15 @@ License     : MIT
 
 Untrusted tactic layer of the checker: decodes tactics from the
 desugared program, selects rewrite sites, proposes one-step proofs
-("Pf") to the trusted kernel ("Kernel") and checks that kernel
-theorems line up with the user's chain.
+("Kernel.Pf") to the trusted kernel ("Kernel") and chains the
+kernel-verified transitions into whole theorems. The output theorems
+are kernel objects: this layer cannot construct one itself.
 -}
-module CheckProofs where
+module CheckProofs
+  ( checkProofs
+  , checkProofsReport
+  , checkProofsTheorems
+  ) where
 
 import GHC
     ( runGhc,
@@ -20,10 +25,11 @@ import GHC
 import GHC.Paths (libdir)
 import GHC.Core
 import GHC.Plugins hiding (L, getModule)
+import Control.Monad.IO.Class (MonadIO)
 
 import System.FilePath ((</>))
-import Control.Monad.State.Lazy ( runStateT, gets, modify )
-import Control.Monad.Except ( runExceptT, MonadError(..) )
+import Control.Monad.State.Lazy ( StateT, runStateT, gets, modify )
+import Control.Monad.Except ( ExceptT, runExceptT, MonadError(..) )
 import Control.Applicative ((<|>))
 import qualified Data.ByteString.Char8 as BS8
 import Data.Generics.Uniplate.Data (universe)
@@ -31,9 +37,17 @@ import Data.Functor ((<&>))
 import Data.List (find)
 import Data.Bifunctor (bimap)
 
-import AstInfo
 import Kernel
-import PrettyString
+    ( Theorem, thmLeft, thmRight
+    , Pf(..), Ctx(..)
+    , alphaEq, alphaEqWithEnv
+    , postThm, symThm
+    , KernelST(..), KernelM
+    , getStrById, inlineLetsIgnoreCast, FuncDef, pstl_id
+    )
+import qualified Kernel (kernelStep, kernelBeta, transThm, madePostulate, logMsg)
+import AstInfo
+import PrettyString (prettyString, prettyStringReport)
 import ProofBase ( RewriteN(..), TacticN(..) )
 import SortDecls ( sorteDeclConvrs )
 
@@ -41,12 +55,29 @@ import SortDecls ( sorteDeclConvrs )
 proofbasePath :: FilePath
 proofbasePath = "src" </> "ProofBase.hs"
 
+-- | The checker log; tactics and kernel emit lines via 'logMsg' into
+-- the state and 'analyzeModuleSt' flushes them here.
+logPath :: FilePath
+logPath = "logs" </> "app.txt"
+
+-- | Write directly to the log file, outside the checker monad.
+logMsg' :: MonadIO m => String -> m ()
+logMsg' message = liftIO $ appendFile logPath (message ++ "\n")
+
 checkProofs :: String -> IO ()
 checkProofs filePath = putStr =<< checkProofsReport filePath
 
 -- | Run the checker on the file and return everything 'checkProofs' prints to stdout
 checkProofsReport :: String -> IO String
-checkProofsReport filePath = do
+checkProofsReport filePath = fst <$> checkProofsResult filePath
+
+-- | Run the checker and return, for every successfully proved
+-- declaration, the kernel-built theorem of its whole chain.
+checkProofsTheorems :: String -> IO [(Id, Theorem)]
+checkProofsTheorems filePath = snd <$> checkProofsResult filePath
+
+checkProofsResult :: String -> IO (String, [(Id, Theorem)])
+checkProofsResult filePath = do
   runGhc (Just libdir) $ do
     dflags' <- getSessionDynFlags
     let dflags = gopt_set dflags' Opt_EnableRewriteRules
@@ -59,10 +90,10 @@ checkProofsReport filePath = do
 
     -- create State
     let astState = getState session (mg_binds mg_main) (mg_binds mg_base)
-    report <- liftIO $ analyzeModuleSt astState
+    (report, theorems) <- liftIO $ analyzeModuleSt astState
 
-    logMsg "\n===== The End: App/Main ====="
-    return (analyzing_file_str ++ "\n" ++ report ++ "\n" ++ "\n===== The End: App/Main =====\n")
+    logMsg' "\n===== The End: App/Main ====="
+    return (analyzing_file_str ++ "\n" ++ report ++ "\n" ++ "\n===== The End: App/Main =====\n", theorems)
 
 
 
@@ -90,16 +121,69 @@ getModulesGuts filePath =
 
 
 ---- COLLECTING AST STATE
+-- | Tactic-layer state: the embedded kernel state plus the decoded
+-- conversions and report bookkeeping.
+data CheckerST = CheckerST {
+  st_kernel       :: KernelST,
+
+  -- | Conversions grouped by declaration.
+  st_declconvrs   :: [DeclConversions],
+
+  -- | Number of generated conversions.
+  st_cnvrs_count  :: Int,
+
+  -- | Identifier of the declaration currently being processed.
+  st_declconvr_id :: Maybe Id,
+
+  -- | Log lines, most recent first; kernel lines are spliced in by
+  -- 'zoomKernel' so the order stays chronological.
+  st_log          :: [String]
+}
+
+-- | Checker monad.
+type CheckerM = ExceptT String (StateT CheckerST IO)
+
+-- | Run a kernel computation on the embedded kernel state, splicing
+-- its log lines into the checker log in order.
+zoomKernel :: KernelM a -> CheckerM a
+zoomKernel kma =
+  do
+    ks <- gets st_kernel
+    (res, ks') <- liftIO $ runStateT (runExceptT kma) ks { ks_log = [] }
+    modify (\st -> st { st_kernel = ks' { ks_log = [] }
+                      , st_log    = ks_log ks' ++ st_log st })
+    either throwError return res
+
+-- Kernel API lifted into the checker monad.
+logMsg :: String -> CheckerM ()
+logMsg = zoomKernel . Kernel.logMsg
+
+kernelStep :: CoreExpr -> Pf -> CoreExpr -> CheckerM Theorem
+kernelStep src pf target = zoomKernel $ Kernel.kernelStep src pf target
+
+kernelBeta :: CoreExpr -> CoreExpr -> CheckerM Theorem
+kernelBeta ctl e = zoomKernel $ Kernel.kernelBeta ctl e
+
+transThm :: Theorem -> Theorem -> CheckerM Theorem
+transThm tl tr = zoomKernel $ Kernel.transThm tl tr
+
+madePostulate :: Id -> Theorem -> CheckerM ()
+madePostulate fn_id thm = zoomKernel $ Kernel.madePostulate fn_id thm
+
 -- | Get Checker state
 getState :: HscEnv -> CoreProgram -> CoreProgram -> CheckerST
 getState hscEnv core_binds base_binds = CheckerST {
+  st_kernel = KernelST {
+    st_funcdefs  = binds,
+    st_base_defs = flattenBinds base_binds,
+    st_postldefs = [],
+    st_hscenv    = hscEnv,
+    ks_log       = []
+  },
   st_declconvrs   = sortedDeclConvrs,
-  st_funcdefs     = binds,
-  st_postldefs    = [],
-  st_hscenv       = hscEnv,
-  st_base_defs    = flattenBinds base_binds,
   st_cnvrs_count  = 0,
-  st_declconvr_id = Nothing
+  st_declconvr_id = Nothing,
+  st_log          = []
   -- TODO. maybe add st_counter = CheckerCounter{}
 }
   where
@@ -211,67 +295,89 @@ newDeclCnvrs decl_id = modify (\st -> st { st_cnvrs_count = 0, st_declconvr_id =
 
 
 ------ Analyze
--- | Main analyzing entry function. Returns the report printed by 'checkProofs'
-analyzeModuleSt :: CheckerST -> IO String
+-- | Main analyzing entry function. Returns the report printed by
+-- 'checkProofs' and the kernel-built theorem of every proved decl.
+analyzeModuleSt :: CheckerST -> IO (String, [(Id, Theorem)])
 analyzeModuleSt checkerST =
 
   do
     result <- mapPassStM runChecker (st_declconvrs checkerST) checkerST
-    logMsg $ prettyStringReport True $ toReport result
-    return $ prettyStringReport False $ toReport result
+    -- flush the log accumulated in the state (oldest first), with the
+    -- full report as the closing line
+    let final_st = if null result then checkerST else snd (last result)
+    liftIO $ appendFile logPath $
+      unlines (reverse (st_log final_st)) ++
+      prettyStringReport True (toReport result)
+    return ( prettyStringReport False $ toReport result
+           , [ (rid, thm) | (Right (rid, thms), _) <- result, thm <- thms ] )
 
   where
     runChecker x = runStateT (runExceptT (analyzeDeclCnvrs x))
     toReport     = foldr resToReport ([], [])
     resToReport (res, st) (succs, fails) = case res of
-      Left reason  -> (succs         , createFail st reason : fails)
-      Right res_id -> (res_id : succs,                        fails)
+      Left reason           -> (succs          , createFail st reason : fails)
+      Right (res_id, _thms) -> (res_id : succs,                        fails)
 
-    analyzeDeclCnvrs :: DeclConversions -> CheckerM Id
+    analyzeDeclCnvrs :: DeclConversions -> CheckerM (Id, [Theorem])
     analyzeDeclCnvrs (decl_id, cnvrs) =
       do
         newDeclCnvrs decl_id
         logMsg $ "\n-----------------------------\n" ++
           "Start analyze declConversion: " ++ prettyString decl_id ++ "\n"
-        mapM_ analyzeConvrs cnvrs
-        madePostulate decl_id
-        return decl_id
+        transitions <- mapM analyzeConvrs cnvrs
+        thms        <- chainThms transitions
+        mapM_ (madePostulate decl_id) thms
+        return (decl_id, thms)
+
+    -- A decl defined by pattern matching desugars to several
+    -- disconnected chains (one per equation clause); fold each into
+    -- its own theorem. transThm rejects mismatches, so only genuinely
+    -- connected transitions compose.
+    chainThms []     = throwError "Internal error. Decl with no conversions."
+    chainThms (t:ts) = go t ts
+      where
+        go acc []     = return [acc]
+        go acc (u:us)
+          | alphaEq (thmRight acc) (thmLeft u) = transThm acc u >>= \acc' -> go acc' us
+          | otherwise                           = (acc :) <$> go u us
 
 
 ---- ANALYZE SINGLE CONVERSION
 -- | Main function entry for analyzing single conversion
-analyzeConvrs :: Conversion -> CheckerM ()
+analyzeConvrs :: Conversion -> CheckerM Theorem
 analyzeConvrs Conversion{..} =
   do
     incCnvrsCounter
     case cn_info of
-      Postulate -> return ()
+      Postulate -> return $ postThm cn_lhs cn_rhs
       L info    -> analyze cn_lhs cn_rhs info
-      R info    -> analyze cn_rhs cn_lhs info
+      R info    -> symThm <$> analyze cn_rhs cn_lhs info
       info      -> throwError $ "Unexpected converseion_info. Expected useful information. Get:" ++ prettyString info
 
   where
-    analyze expr control_expr expr_info =
-      do
-        let analyzeExpr = case expr_info of
-              Def  comment   -> analyzeDefConv  comment 0
-              Prop comment   -> analyzePropConv comment
-              Inst comment   -> analyzeInstConv comment
-              DefRec cmnt n  -> analyzeDefConv  cmnt n
-              Eta            -> analyzeEtaConv
-              Beta           -> analyzeBetaConv
-        (ce, e) <- analyzeExpr control_expr expr
-        cmpCnvrs ce e
+    -- Proves the transition theorem @expr ≡ control_expr@: the tactic
+    -- rewrites @expr@ and the kernel must reach @control_expr@.
+    analyze expr control_expr expr_info = do
+      let analyzeExpr = case expr_info of
+            Def  comment   -> analyzeDefConv  comment 0
+            Prop comment   -> analyzePropConv comment
+            Inst comment   -> analyzeInstConv comment
+            DefRec cmnt n  -> analyzeDefConv  cmnt n
+            Eta            -> analyzeEtaConv
+            Beta           -> analyzeBetaConv
+      analyzeExpr control_expr expr
 
 
 ---- TACTICS
 -- Each tactic selects where the rewrite applies (getFirstDiff /
 -- getNAppearance), checks the target against the tactic's name, and
--- proposes a kernel step; the kernel validates the rewrite itself.
+-- proposes a kernel step; the kernel validates the rewrite itself and
+-- that the proposed site decomposes the rewritten line.
 
 ---- just believe that this is enought
 -- | Function search of first diff between expression.
--- Returns the differing subexpression and the context it sits in.
+-- Returns the differing subexpression and the context it sits in;
+-- @plugCtx ctx diff@ is always the inspected line.
 getFirstDiff :: CoreExpr -> CoreExpr -> CheckerM (CoreExpr, Ctx)
 getFirstDiff contrl_expr expr =
   do
@@ -290,7 +396,9 @@ getFirstDiff contrl_expr expr =
     go cm_envs (App cntr_f cntr_arg) (App f arg) =
       (go cm_envs cntr_f f <&>
         \case
-          (diff, ctx, True)  -> (App diff arg, ctx, True)
+          -- the diff extends up the application spine; the site is the
+          -- whole spine, so the context resets with every extension
+          (diff, _, True)    -> (App diff arg, Hole, True)
           (diff, ctx, False) -> (diff, CAppF ctx arg, False))
         <|> (go cm_envs cntr_arg arg <&> updBuilder (CAppA f))
     go cm_envs ce e@(App _ _) = checkEq cm_envs ce e True
@@ -320,14 +428,16 @@ getNAppearance comnt m expr = go m expr >>= (\(x, y, _) -> return (x, y))
     updBuilder updater (diff_expr, ctx, n) = (diff_expr, updater ctx, n)
 
 -- | Analyze beta reduction conversions
-analyzeBetaConv :: CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
--- TODO (next phase): verify with the trusted normalizer. Today both
--- sides are returned unchanged and only alphaEq-checked, which works
--- because the desugarer already beta-reduces source redexes.
-analyzeBetaConv control_expr expr = return (control_expr, expr)
+analyzeBetaConv :: CoreExpr -> CoreExpr -> CheckerM Theorem
+analyzeBetaConv control_expr expr =
+  do
+    logMsg "Evaluate beta-conversion"
+    -- kernelBeta proves @control_expr ≡ expr@ by normalizing both;
+    -- the transition goes the other way, hence symmetry
+    symThm <$> kernelBeta control_expr expr
 
 -- | Analyze Def annotated conversions
-analyzeDefConv :: NameRef -> Integer -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
+analyzeDefConv :: NameRef -> Integer -> CoreExpr -> CoreExpr -> CheckerM Theorem
 analyzeDefConv comment n control_expr expr =
   do
     logMsg "Evaluate def-conversion"
@@ -337,8 +447,7 @@ analyzeDefConv comment n control_expr expr =
         else getNAppearance comment n expr
     let (func, args) = collectArgs diff_expr
     func_id         <- checkComment func
-    thm             <- kernelCheck (DefAt ctx func_id args)
-    return (control_expr, thmRhs thm)
+    kernelStep expr (DefAt ctx func_id args) control_expr
 
   where
     checkComment :: CoreExpr -> CheckerM Id
@@ -351,12 +460,12 @@ analyzeDefConv comment n control_expr expr =
     checkComment e = throwError $ "Applied expression not a function call!\nGot: " ++ prettyString e
 
 -- | Analyze Prop annotated conversions
-analyzePropConv :: NameRef -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
+analyzePropConv :: NameRef -> CoreExpr -> CoreExpr -> CheckerM Theorem
 analyzePropConv comment control_expr expr =
   do
     logMsg "Evaluate prop-conversion"
     (diff_expr, ctx) <- getFirstDiff control_expr expr
-    postl_defs       <- gets st_postldefs
+    postl_defs       <- gets (st_postldefs . st_kernel)
     let matchedPstls  = filter (nameMatchesId comment . pstl_id) postl_defs
     pstl <- case matchedPstls of
       [pstl] -> return pstl
@@ -366,20 +475,18 @@ analyzePropConv comment control_expr expr =
     case collectArgs diff_expr of
       (Var _, _) -> return ()
       _          -> throwError $ "Not implemented: " ++ "postl dif not var."
-    thm <- kernelCheck (RuleAt ctx diff_expr pstl)
-    return (control_expr, thmRhs thm)
+    kernelStep expr (RuleAt ctx diff_expr pstl) control_expr
 
 
 -- | Analyze Inst annotated conversions
-analyzeInstConv :: NameRef -> CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
+analyzeInstConv :: NameRef -> CoreExpr -> CoreExpr -> CheckerM Theorem
 analyzeInstConv comment control_expr expr =
   do
     logMsg "Evaluate inst-conversion"
     (diff_expr, ctx) <- getFirstDiff control_expr expr
     let (func, _) = collectArgs diff_expr
-    checkComment func
-    thm <- kernelCheck (InstAt ctx diff_expr)
-    return (control_expr, thmRhs thm)
+    _  <- checkComment func
+    kernelStep expr (InstAt ctx diff_expr) control_expr
 
   where
     checkComment :: CoreExpr -> CheckerM Id
@@ -392,10 +499,9 @@ analyzeInstConv comment control_expr expr =
     checkComment e = throwError $ "Applied expression not a function call!\nGot: " ++ prettyString e
 
 -- | Analyze eta reduction conversions
-analyzeEtaConv :: CoreExpr -> CoreExpr -> CheckerM (CoreExpr, CoreExpr)
+analyzeEtaConv :: CoreExpr -> CoreExpr -> CheckerM Theorem
 analyzeEtaConv control_expr expr =
   do
     logMsg "Evaluate eta-reduction"
     (diff_expr, ctx) <- getFirstDiff control_expr expr
-    thm <- kernelCheck (EtaAt ctx diff_expr)
-    return (control_expr, thmRhs thm)
+    kernelStep expr (EtaAt ctx diff_expr) control_expr

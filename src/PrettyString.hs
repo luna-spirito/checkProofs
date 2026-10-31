@@ -12,7 +12,6 @@ import GHC.Utils.Outputable
     ( Outputable(..),
       IsLine((<+>), text),
       doubleQuotes,
-      int,
       integer,
       nest,
       parens,
@@ -33,33 +32,6 @@ instance Outputable Conversion where
            text "lhs:"  <+> ppr (cn_lhs c)
         $$ text "rhs:"  <+> ppr (cn_rhs c)
         $$ text "info:" <+> ppr (cn_info c)
-      )
-
-instance Outputable CheckerST where
-  ppr CheckerST{..} =
-    text "===== AstInfo CheckerST ====="
-      $$ nest 2 (
-           text "ST_declconvrs:"
-             $$ nest 2 ( ppr st_declconvrs )
-        $$ text "ST_funcDefs:"
-             <+> int (length st_funcdefs)
-        $$ text "ST_postlDefs:"
-             <+> int (length st_postldefs)
-        $$ text "ST_baseDefs:"
-             <+> int (length st_base_defs)
-        $$ text "current conversion number:"
-             <+> int st_cnvrs_count
-        $$ text "current decl:"
-             <+> ppr st_declconvr_id
-      )
-
-instance Outputable PostlDef where
-  ppr p =
-    text "PostlDef"
-      $$ nest 2 (
-           text "id:"   <+> ppr (pstl_id p)
-        $$ text "fid:"  <+> ppr (pstl_fid p)
-        $$ text "rule:" <+> ppr (pstl_rule p)
       )
 
 instance Outputable (RewriteN NameRef) where
